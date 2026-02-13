@@ -204,6 +204,7 @@ class DelayedCameraView: UIView {
         let view = UIView()
         view.backgroundColor = .clear
         view.translatesAutoresizingMaskIntoConstraints = false
+        view.clipsToBounds = false  // ADD THIS - allow touch area to extend beyond visible bounds
         return view
     }()
 
@@ -381,6 +382,7 @@ class DelayedCameraView: UIView {
     private var clipBackgroundLeadingConstraint: NSLayoutConstraint?
     private var clipBackgroundTrailingConstraint: NSLayoutConstraint?
     private var scrubberPlayheadConstraint: NSLayoutConstraint?
+    private var scrubberTouchAreaConstraint: NSLayoutConstraint?
 
     private let timeLabel: UILabel = {
         let label = UILabel()
@@ -586,8 +588,12 @@ class DelayedCameraView: UIView {
         playheadTouchArea.addGestureRecognizer(playheadPan)
 
         // NEW: Add pan gesture to scrubber touch area
+        //let scrubberPan = UIPanGestureRecognizer(target: self, action: #selector(handleScrubberPan(_:)))
+        //scrubberPan.delegate = self
+        //scrubberTouchArea.addGestureRecognizer(scrubberPan)
         let scrubberPan = UIPanGestureRecognizer(target: self, action: #selector(handleScrubberPan(_:)))
-        scrubberTouchArea.addGestureRecognizer(scrubberPan)
+        scrubberPan.delegate = self
+        timelineContainer.addGestureRecognizer(scrubberPan)
 
         // Add tap gesture to timeline for jumping playhead
         let timelineTap = UITapGestureRecognizer(target: self, action: #selector(handleTimelineTap(_:)))
@@ -660,7 +666,6 @@ class DelayedCameraView: UIView {
             scrubberPlayheadKnob.heightAnchor.constraint(equalToConstant: 16),
 
             // Scrubber touch area (44px wide for easy dragging)
-            scrubberTouchArea.centerXAnchor.constraint(equalTo: scrubberPlayhead.centerXAnchor),
             scrubberTouchArea.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             scrubberTouchArea.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             scrubberTouchArea.widthAnchor.constraint(equalToConstant: 44),
@@ -735,6 +740,9 @@ class DelayedCameraView: UIView {
 
         scrubberPlayheadConstraint = scrubberPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: 0)
         scrubberPlayheadConstraint?.isActive = true
+        // NEW: Add constraint for touch area centered on playhead
+        scrubberTouchAreaConstraint = scrubberTouchArea.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: -22)
+        scrubberTouchAreaConstraint?.isActive = true
     }
 
     @objc private func handleTap() {
@@ -959,10 +967,13 @@ class DelayedCameraView: UIView {
 
     // NEW: Handle scrubber panning (replaces slider)
     @objc private func handleScrubberPan(_ gesture: UIPanGestureRecognizer) {
-        if isLooping {
-            stopLoop()
+        if gesture.state == .began {
+            print("🎯 Scrubber pan BEGAN at location: \(gesture.location(in: timelineContainer))")
+            if isLooping {
+                stopLoop()
+            }
         }
-
+        
         let location = gesture.location(in: timelineContainer)
 
         metadataLock.lock()
@@ -970,7 +981,10 @@ class DelayedCameraView: UIView {
         metadataLock.unlock()
 
         let requiredFrames = delaySeconds * 30
-        guard totalFrames >= requiredFrames else { return }
+        guard totalFrames >= requiredFrames else {
+            print("⚠️ Not enough frames: \(totalFrames) < \(requiredFrames)")
+            return
+        }
 
         let pausePointIndex = totalFrames - requiredFrames
         let scrubBackFrames = 30 * 30
@@ -979,13 +993,37 @@ class DelayedCameraView: UIView {
         let scrubRange = pausePointIndex - oldestAllowedIndex
         let timelineWidth = timelineContainer.bounds.width
 
-        guard scrubRange > 0, timelineWidth > 0 else { return }
+        guard scrubRange > 0, timelineWidth > 0 else {
+            print("⚠️ Invalid range or width: scrubRange=\(scrubRange), width=\(timelineWidth)")
+            return
+        }
 
+        // Clamp location within timeline bounds
         let clampedX = max(0, min(location.x, timelineWidth))
         let normalizedPosition = clampedX / timelineWidth
 
         let frameIndex = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
+        
+        // Ensure scrubberPosition stays within valid range
+        let beforeClamp = frameIndex
         scrubberPosition = max(oldestAllowedIndex, min(frameIndex, pausePointIndex))
+        
+        // FIX: Ensure position is at least 1 to avoid index 0 errors
+        let beforeMinClamp = scrubberPosition
+        scrubberPosition = max(1, scrubberPosition)
+        
+        if gesture.state == .began || gesture.state == .ended {
+            print("📍 Scrubber position update:")
+            print("   location.x: \(location.x), clampedX: \(clampedX)")
+            print("   timelineWidth: \(timelineWidth)")
+            print("   normalizedPosition: \(normalizedPosition)")
+            print("   oldestAllowed: \(oldestAllowedIndex), pausePoint: \(pausePointIndex)")
+            print("   scrubRange: \(scrubRange)")
+            print("   frameIndex (before clamp): \(beforeClamp)")
+            print("   after range clamp: \(beforeMinClamp)")
+            print("   FINAL scrubberPosition: \(scrubberPosition)")
+        }
+        
         loopFrameIndex = scrubberPosition
 
         updateScrubberPlayheadPosition()
@@ -1033,7 +1071,15 @@ class DelayedCameraView: UIView {
         let playheadX = normalizedPosition * timelineWidth
 
         scrubberPlayheadConstraint?.constant = playheadX
-        scrubberTouchArea.frame.origin.x = playheadX - 22
+        
+        // Update touch area constraint to center it on the playhead
+        // BUT clamp it so the touch area stays within bounds
+        let idealTouchAreaX = playheadX - 22  // Center 44px touch area on playhead
+        let clampedTouchAreaX = max(0, min(idealTouchAreaX, timelineWidth - 44))
+        
+        scrubberTouchAreaConstraint?.constant = clampedTouchAreaX
+        
+        print("🎯 Touch area update: playheadX=\(playheadX), idealX=\(idealTouchAreaX), clampedX=\(clampedTouchAreaX), timelineWidth=\(timelineWidth)")
 
         timelineContainer.layoutIfNeeded()
     }
@@ -1065,9 +1111,9 @@ class DelayedCameraView: UIView {
             endFrame = clipEndIndex
             loopFrameIndex = clipPlayheadPosition
         } else {
-            startFrame = oldestAllowedIndex
+            startFrame = max(1, oldestAllowedIndex)  // FIX: Ensure at least 1
             endFrame = pausePointIndex
-            loopFrameIndex = scrubberPosition
+            loopFrameIndex = max(1, scrubberPosition)  // FIX: Ensure at least 1
         }
 
         loopTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in
@@ -1440,6 +1486,9 @@ class DelayedCameraView: UIView {
             let pausePointIndex = totalFrames - requiredFrames
             scrubberPosition = pausePointIndex
             loopFrameIndex = pausePointIndex
+            
+            // Position the scrubber playhead at the end (most recent frame)
+            updateScrubberPlayheadPosition()
         }
 
         showControls()
@@ -1503,11 +1552,20 @@ class DelayedCameraView: UIView {
         metadataLock.unlock()
 
         let requiredFrames = delaySeconds * 30
-        guard totalFrames >= requiredFrames else { return }
+        guard totalFrames >= requiredFrames else {
+            print("⚠️ Not enough frames to enter clip mode")
+            return
+        }
 
         let pausePointIndex = totalFrames - requiredFrames
         let scrubBackFrames = 30 * 30
         let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+
+        // FIX: Ensure we have a valid range before entering clip mode
+        guard pausePointIndex > oldestAllowedIndex else {
+            print("⚠️ Invalid frame range for clip mode: oldest=\(oldestAllowedIndex) pause=\(pausePointIndex)")
+            return
+        }
 
         // NEW: Default to FULL RANGE (start to end)
         clipStartIndex = oldestAllowedIndex
@@ -1599,6 +1657,9 @@ class DelayedCameraView: UIView {
     }
 
     private func updateClipHandlePositions() {
+        // FIX: Only update handle positions when in clip mode
+        guard isClipMode else { return }
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
@@ -1626,6 +1687,9 @@ class DelayedCameraView: UIView {
     }
 
     private func updatePlayheadPosition() {
+        // FIX: Only update playhead position when in clip mode
+        guard isClipMode else { return }
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
@@ -1648,17 +1712,36 @@ class DelayedCameraView: UIView {
 
         let clipRegionWidth = rightHandleLeftEdge - leftHandleRightEdge
 
+        // Guard against division by zero
+        guard clipEndIndex > clipStartIndex else {
+            print("⚠️ Invalid clip range: start=\(clipStartIndex) end=\(clipEndIndex)")
+            return
+        }
+
         let normalizedPlayheadPosition = CGFloat(clipPlayheadPosition - clipStartIndex) / CGFloat(clipEndIndex - clipStartIndex)
         let playheadPosition = leftHandleRightEdge + (normalizedPlayheadPosition * clipRegionWidth)
 
+        // Verify the position is valid before setting constraint
+        guard playheadPosition.isFinite else {
+            print("⚠️ Invalid playhead position calculated: \(playheadPosition)")
+            return
+        }
+
         playheadConstraint?.constant = playheadPosition
 
-        playheadTouchArea.frame.origin.x = playheadPosition - 22
+        // Clamp touch area within timeline bounds
+        let touchAreaWidth: CGFloat = 44
+        let idealTouchX = playheadPosition - (touchAreaWidth / 2)
+        let clampedTouchX = max(0, min(idealTouchX, timelineWidth - touchAreaWidth))
+        playheadTouchArea.frame.origin.x = clampedTouchX
 
         timelineContainer.layoutIfNeeded()
     }
 
     private func updateTimeLabel() {
+        // FIX: Only update time label for clip mode
+        guard isClipMode else { return }
+        
         let timeInClip = Float(clipPlayheadPosition - clipStartIndex) / 30.0
         DispatchQueue.main.async {
             self.timeLabel.text = String(format: "%.1fs", timeInClip)
@@ -2058,6 +2141,23 @@ class DelayedCameraView: UIView {
             viewController.present(alert, animated: true)
         }
     }
+    
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        // If we're in scrubber mode (paused but not clip mode) and the touch is near the timeline
+        if isPaused && !isClipMode {
+            let timelinePoint = convert(point, to: timelineContainer)
+            
+            // Expand timeline hit area by 22px horizontally to catch playhead knob touches
+            let expandedTimelineBounds = timelineContainer.bounds.insetBy(dx: -22, dy: -10)
+            
+            if expandedTimelineBounds.contains(timelinePoint) {
+                // Return the timeline so it receives the touch
+                return timelineContainer
+            }
+        }
+        
+        return super.hitTest(point, with: event)
+    }
 }
 
 // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
@@ -2086,4 +2186,18 @@ extension DelayedCameraView: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 }
 
-
+// MARK: - UIGestureRecognizerDelegate
+extension DelayedCameraView: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        let location = touch.location(in: timelineContainer)
+        
+        // In clip mode, only handle touches on the clip playhead touch area
+        if isClipMode {
+            return touch.view == playheadTouchArea
+        }
+        
+        // In scrubber mode, handle ALL touches on the timeline
+        print("👆 Touch received at: \(location) on timeline")
+        return true
+    }
+}
