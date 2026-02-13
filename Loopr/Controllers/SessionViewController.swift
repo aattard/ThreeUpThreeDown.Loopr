@@ -318,7 +318,7 @@ class SessionViewController: UIViewController {
             cameraView.pausePlayback()
             pauseButton.setTitle("Resume", for: .normal)
         } else {
-            cameraView.resumePlayback()
+            //cameraView.resumePlayback()
             pauseButton.setTitle("Pause", for: .normal)
         }
         

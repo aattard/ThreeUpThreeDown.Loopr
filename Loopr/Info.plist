@@ -23,5 +23,11 @@
 	<array>
 		<string>audio</string>
 	</array>
+    <!-- For saving videos (iOS 14+) -->
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Save your baseball or softball swing clips to your Photos library</string>
+    <!-- Legacy key (iOS 13 and below) - still required -->
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Save your baseball or softball swing clips to your Photos library</string>
 </dict>
 </plist>
