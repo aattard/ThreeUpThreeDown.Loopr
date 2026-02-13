@@ -207,15 +207,41 @@ class DelayedCameraView: UIView {
         return view
     }()
 
-    private let scrubberSlider: UISlider = {
-        let slider = UISlider()
-        slider.minimumValue = 0
-        slider.maximumValue = 1
-        slider.value = 1
-        slider.minimumTrackTintColor = .systemRed
-        slider.maximumTrackTintColor = .white.withAlphaComponent(0.3)
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        return slider
+    // NEW: Scrubber background (purple bar like clip mode)
+    private let scrubberBackground: UIView = {
+        let view = UIView()
+        view.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
+        view.layer.cornerRadius = 6
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
+    }()
+
+    // NEW: Scrubber playhead (white line)
+    private let scrubberPlayhead: UIView = {
+        let view = UIView()
+        view.backgroundColor = .white
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isUserInteractionEnabled = false
+        return view
+    }()
+
+    // NEW: Scrubber playhead knob (white circle at top)
+    private let scrubberPlayheadKnob: UIView = {
+        let view = UIView()
+        view.backgroundColor = .white
+        view.layer.cornerRadius = 8
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isUserInteractionEnabled = false
+        return view
+    }()
+
+    // NEW: Scrubber touch area (44px wide for easy dragging)
+    private let scrubberTouchArea: UIView = {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isUserInteractionEnabled = true
+        return view
     }()
 
     private let leftDimView: UIView = {
@@ -354,6 +380,7 @@ class DelayedCameraView: UIView {
     private var playheadWidthConstraint: NSLayoutConstraint?
     private var clipBackgroundLeadingConstraint: NSLayoutConstraint?
     private var clipBackgroundTrailingConstraint: NSLayoutConstraint?
+    private var scrubberPlayheadConstraint: NSLayoutConstraint?
 
     private let timeLabel: UILabel = {
         let label = UILabel()
@@ -503,6 +530,8 @@ class DelayedCameraView: UIView {
         if isClipMode {
             updateClipHandlePositions()
             updatePlayheadPosition()
+        } else if isPaused {
+            updateScrubberPlayheadPosition()
         }
     }
 
@@ -517,11 +546,16 @@ class DelayedCameraView: UIView {
         controlsContainer.addSubview(restartButton)
         controlsContainer.addSubview(stopSessionButton)
 
-        // Add clip background FIRST (behind everything)
+        // Add scrubber background and playhead FIRST
+        timelineContainer.addSubview(scrubberBackground)
+        timelineContainer.addSubview(scrubberPlayhead)
+        scrubberPlayhead.addSubview(scrubberPlayheadKnob)
+        timelineContainer.addSubview(scrubberTouchArea)
+
+        // Add clip background
         timelineContainer.addSubview(clipRegionBackground)
 
-        // Add scrubber and trim UI to timeline container
-        timelineContainer.addSubview(scrubberSlider)
+        // Add trim UI to timeline container
         timelineContainer.addSubview(leftDimView)
         timelineContainer.addSubview(rightDimView)
         timelineContainer.addSubview(topBorder)
@@ -535,8 +569,6 @@ class DelayedCameraView: UIView {
         timelineContainer.addSubview(playheadTouchArea)
 
         playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
-        scrubberSlider.addTarget(self, action: #selector(scrubberChanged), for: .valueChanged)
-        scrubberSlider.addTarget(self, action: #selector(scrubberTouchEnded), for: [.touchUpInside, .touchUpOutside])
         stopSessionButton.addTarget(self, action: #selector(stopSessionTapped), for: .touchUpInside)
         clipSaveButton.addTarget(self, action: #selector(clipSaveButtonTapped), for: .touchUpInside)
         restartButton.addTarget(self, action: #selector(restartButtonTapped), for: .touchUpInside)
@@ -552,6 +584,10 @@ class DelayedCameraView: UIView {
         // Add pan gesture to playhead touch area
         let playheadPan = UIPanGestureRecognizer(target: self, action: #selector(handlePlayheadPan(_:)))
         playheadTouchArea.addGestureRecognizer(playheadPan)
+
+        // NEW: Add pan gesture to scrubber touch area
+        let scrubberPan = UIPanGestureRecognizer(target: self, action: #selector(handleScrubberPan(_:)))
+        scrubberTouchArea.addGestureRecognizer(scrubberPan)
 
         // Add tap gesture to timeline for jumping playhead
         let timelineTap = UITapGestureRecognizer(target: self, action: #selector(handleTimelineTap(_:)))
@@ -606,14 +642,32 @@ class DelayedCameraView: UIView {
             timelineContainer.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             timelineContainer.heightAnchor.constraint(equalToConstant: 44),
 
+            // Scrubber background (purple bar)
+            scrubberBackground.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
+            scrubberBackground.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
+            scrubberBackground.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
+            scrubberBackground.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
+
+            // Scrubber playhead line (3px wide white line)
+            scrubberPlayhead.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
+            scrubberPlayhead.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
+            scrubberPlayhead.widthAnchor.constraint(equalToConstant: 3),
+
+            // Scrubber playhead knob (white circle at top)
+            scrubberPlayheadKnob.centerXAnchor.constraint(equalTo: scrubberPlayhead.centerXAnchor),
+            scrubberPlayheadKnob.topAnchor.constraint(equalTo: scrubberPlayhead.topAnchor, constant: -6),
+            scrubberPlayheadKnob.widthAnchor.constraint(equalToConstant: 16),
+            scrubberPlayheadKnob.heightAnchor.constraint(equalToConstant: 16),
+
+            // Scrubber touch area (44px wide for easy dragging)
+            scrubberTouchArea.centerXAnchor.constraint(equalTo: scrubberPlayhead.centerXAnchor),
+            scrubberTouchArea.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
+            scrubberTouchArea.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
+            scrubberTouchArea.widthAnchor.constraint(equalToConstant: 44),
+
             // Clip region background (purple)
             clipRegionBackground.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             clipRegionBackground.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
-
-            // Scrubber fills timeline container
-            scrubberSlider.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
-            scrubberSlider.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
-            scrubberSlider.centerYAnchor.constraint(equalTo: timelineContainer.centerYAnchor),
 
             // Dim views
             leftDimView.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
@@ -678,6 +732,9 @@ class DelayedCameraView: UIView {
         playheadWidthConstraint?.isActive = true
         clipBackgroundLeadingConstraint?.isActive = true
         clipBackgroundTrailingConstraint?.isActive = true
+
+        scrubberPlayheadConstraint = scrubberPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: 0)
+        scrubberPlayheadConstraint?.isActive = true
     }
 
     @objc private func handleTap() {
@@ -899,17 +956,14 @@ class DelayedCameraView: UIView {
         startCountdown()
     }
 
-    @objc private func scrubberChanged() {
+
+    // NEW: Handle scrubber panning (replaces slider)
+    @objc private func handleScrubberPan(_ gesture: UIPanGestureRecognizer) {
         if isLooping {
             stopLoop()
         }
 
-        let currentTime = CACurrentMediaTime()
-        if currentTime - lastUpdateTime < 0.1 {
-            return
-        }
-
-        lastUpdateTime = currentTime
+        let location = gesture.location(in: timelineContainer)
 
         metadataLock.lock()
         let totalFrames = frameMetadata.count
@@ -923,29 +977,65 @@ class DelayedCameraView: UIView {
         let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
 
         let scrubRange = pausePointIndex - oldestAllowedIndex
-        if scrubRange > 0 {
-            let frameIndex = oldestAllowedIndex + Int(scrubberSlider.value * Float(scrubRange))
-            scrubberPosition = max(oldestAllowedIndex, min(frameIndex, pausePointIndex))
-            loopFrameIndex = scrubberPosition
+        let timelineWidth = timelineContainer.bounds.width
 
-            let secondsFromPause = Float(pausePointIndex - scrubberPosition) / 30.0
-            DispatchQueue.main.async {
-                if secondsFromPause < 0.1 {
-                    self.timeLabel.text = "0.0s"
-                } else {
-                    self.timeLabel.text = String(format: "-%.1fs", secondsFromPause)
-                }
-            }
+        guard scrubRange > 0, timelineWidth > 0 else { return }
 
-            videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
-                guard let self = self, let image = image else { return }
-                self.displayFrame(image)
+        let clampedX = max(0, min(location.x, timelineWidth))
+        let normalizedPosition = clampedX / timelineWidth
+
+        let frameIndex = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
+        scrubberPosition = max(oldestAllowedIndex, min(frameIndex, pausePointIndex))
+        loopFrameIndex = scrubberPosition
+
+        updateScrubberPlayheadPosition()
+
+        let secondsFromPause = Float(pausePointIndex - scrubberPosition) / 30.0
+        DispatchQueue.main.async {
+            if secondsFromPause < 0.1 {
+                self.timeLabel.text = "0.0s"
+            } else {
+                self.timeLabel.text = String(format: "-%.1fs", secondsFromPause)
             }
+        }
+
+        let currentTime = CACurrentMediaTime()
+        if gesture.state == .changed && currentTime - lastUpdateTime < 0.05 {
+            return
+        }
+        lastUpdateTime = currentTime
+
+        videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
+            guard let self = self, let image = image else { return }
+            self.displayFrame(image)
         }
     }
 
-    @objc private func scrubberTouchEnded() {
-        // Keep paused
+    private func updateScrubberPlayheadPosition() {
+        metadataLock.lock()
+        let totalFrames = frameMetadata.count
+        metadataLock.unlock()
+
+        let requiredFrames = delaySeconds * 30
+        guard totalFrames >= requiredFrames else { return }
+
+        let pausePointIndex = totalFrames - requiredFrames
+        let scrubBackFrames = 30 * 30
+        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+        let scrubRange = pausePointIndex - oldestAllowedIndex
+
+        guard scrubRange > 0 else { return }
+
+        let timelineWidth = timelineContainer.bounds.width
+        guard timelineWidth > 0 else { return }
+
+        let normalizedPosition = CGFloat(scrubberPosition - oldestAllowedIndex) / CGFloat(scrubRange)
+        let playheadX = normalizedPosition * timelineWidth
+
+        scrubberPlayheadConstraint?.constant = playheadX
+        scrubberTouchArea.frame.origin.x = playheadX - 22
+
+        timelineContainer.layoutIfNeeded()
     }
 
     private func startLoop() {
@@ -994,10 +1084,10 @@ class DelayedCameraView: UIView {
                 self.updateTimeLabel()
             } else {
                 self.scrubberPosition = self.loopFrameIndex
-                let normalizedPosition = Float(self.loopFrameIndex - startFrame) / Float(endFrame - startFrame)
+                self.updateScrubberPlayheadPosition()
+                
+                let secondsFromStart = Float(self.loopFrameIndex - startFrame) / 30.0
                 DispatchQueue.main.async {
-                    self.scrubberSlider.value = normalizedPosition
-                    let secondsFromStart = Float(self.loopFrameIndex - startFrame) / 30.0
                     self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
                 }
             }
@@ -1283,7 +1373,6 @@ class DelayedCameraView: UIView {
         }
 
         DispatchQueue.main.async {
-            self.scrubberSlider.value = 1.0
             self.timeLabel.text = "LIVE"
         }
     }
@@ -1340,7 +1429,6 @@ class DelayedCameraView: UIView {
             }
         }
 
-        scrubberSlider.value = 1.0
         timeLabel.text = "0.0s"
 
         metadataLock.lock()
@@ -1436,7 +1524,8 @@ class DelayedCameraView: UIView {
 
         UIView.animate(withDuration: 0.3) {
             // Hide scrubber completely
-            self.scrubberSlider.alpha = 0
+            self.scrubberBackground.alpha = 0
+            self.scrubberPlayhead.alpha = 0
 
             // Show purple clip background
             self.clipRegionBackground.isHidden = false
@@ -1486,7 +1575,8 @@ class DelayedCameraView: UIView {
 
         UIView.animate(withDuration: 0.3) {
             // Show scrubber
-            self.scrubberSlider.alpha = 1
+            self.scrubberBackground.alpha = 1
+            self.scrubberPlayhead.alpha = 1
 
             // Hide purple background
             self.clipRegionBackground.isHidden = true
@@ -1995,4 +2085,5 @@ extension DelayedCameraView: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
 }
+
 
