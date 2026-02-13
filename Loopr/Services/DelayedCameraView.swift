@@ -1028,13 +1028,10 @@ class DelayedCameraView: UIView {
 
         updateScrubberPlayheadPosition()
 
-        let secondsFromPause = Float(pausePointIndex - scrubberPosition) / 30.0
+        // Show time from the START of the scrubable range, not from pause point
+        let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / 30.0
         DispatchQueue.main.async {
-            if secondsFromPause < 0.1 {
-                self.timeLabel.text = "0.0s"
-            } else {
-                self.timeLabel.text = String(format: "-%.1fs", secondsFromPause)
-            }
+            self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
         }
 
         let currentTime = CACurrentMediaTime()
@@ -1475,8 +1472,7 @@ class DelayedCameraView: UIView {
             }
         }
 
-        timeLabel.text = "0.0s"
-
+        // Show the actual time at the pause point (end of scrubable range)
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
@@ -1484,11 +1480,18 @@ class DelayedCameraView: UIView {
         let requiredFrames = delaySeconds * 30
         if totalFrames >= requiredFrames {
             let pausePointIndex = totalFrames - requiredFrames
+            let scrubBackFrames = 30 * 30
+            let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+            let durationSeconds = Float(pausePointIndex - oldestAllowedIndex) / 30.0
+            timeLabel.text = String(format: "%.1fs", durationSeconds)
+            
             scrubberPosition = pausePointIndex
             loopFrameIndex = pausePointIndex
             
             // Position the scrubber playhead at the end (most recent frame)
             updateScrubberPlayheadPosition()
+        } else {
+            timeLabel.text = "0.0s"
         }
 
         showControls()
