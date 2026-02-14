@@ -562,13 +562,13 @@ class DelayedCameraView: UIView {
         timelineContainer.addSubview(rightDimView)
         timelineContainer.addSubview(topBorder)
         timelineContainer.addSubview(bottomBorder)
+        timelineContainer.addSubview(playheadTouchArea)
         timelineContainer.addSubview(leftTrimHandle)
         timelineContainer.addSubview(rightTrimHandle)
 
         // Add playhead, knob, and touch area
         timelineContainer.addSubview(clipPlayhead)
         clipPlayhead.addSubview(clipPlayheadKnob)
-        timelineContainer.addSubview(playheadTouchArea)
 
         playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
         stopSessionButton.addTarget(self, action: #selector(stopSessionTapped), for: .touchUpInside)
@@ -1760,12 +1760,18 @@ class DelayedCameraView: UIView {
 
     @objc private func handleLeftTrimPan(_ gesture: UIPanGestureRecognizer) {
         let translation = gesture.translation(in: timelineContainer)
-
+        
         if gesture.state == .began {
+            // PAUSE ON DRAG
+            if isLooping {
+                stopLoop()
+            }
+            
             isDraggingHandle = true
             initialLeftPosition = leftHandleConstraint?.constant ?? 0
             initialClipStartIndex = clipStartIndex
-
+            
+            // Hide playhead for visual clarity during drag
             self.clipPlayhead.alpha = 0
             self.playheadTouchArea.alpha = 0
         }
@@ -1818,46 +1824,49 @@ class DelayedCameraView: UIView {
 
     @objc private func handleRightTrimPan(_ gesture: UIPanGestureRecognizer) {
         let translation = gesture.translation(in: timelineContainer)
-
+        
         if gesture.state == .began {
+            if isLooping { stopLoop() }
             isDraggingHandle = true
-            let timelineWidth = timelineContainer.bounds.width
-            initialRightPosition = timelineWidth - (abs(rightHandleConstraint?.constant ?? 0))
+            initialRightPosition = rightHandleConstraint?.constant ?? 0
             initialClipEndIndex = clipEndIndex
-
-            self.clipPlayhead.alpha = 0
-            self.playheadTouchArea.alpha = 0
         }
-
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
         guard totalFrames >= requiredFrames else { return }
-
+        
         let pausePointIndex = totalFrames - requiredFrames
         let scrubBackFrames = 30 * 30
         let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
         let scrubRange = pausePointIndex - oldestAllowedIndex
-
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
-
-        let newRightPosition = initialRightPosition + translation.x
-        let normalizedPosition = max(0, min(newRightPosition / timelineWidth, 1.0))
+        
+        // FIX: Calculate the handle's X position relative to the LEFT edge
+        // Since initialRightPosition is a trailing constant (negative or 0),
+        // the distance from the left is: timelineWidth + constant + translation
+        let currentXFromLeft = timelineWidth + initialRightPosition + translation.x
+        
+        // Normalize based on the full width
+        let normalizedPosition = max(0, min(currentXFromLeft / timelineWidth, 1.0))
+        
         let newEndFrame = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
-
+        
+        // Ensure the clip is at least 1 second (30 frames) long
         let minEndFrame = clipStartIndex + 30
         let maxEndFrame = pausePointIndex
-
+        
         clipEndIndex = max(minEndFrame, min(newEndFrame, maxEndFrame))
-        clipPlayheadPosition = clipEndIndex
-
+        clipPlayheadPosition = clipEndIndex // Update playhead to follow the drag
+        
         updateClipHandlePositions()
         updatePlayheadPosition()
         updateTimeLabel()
-
+        
         if gesture.state == .changed {
             let now = CACurrentMediaTime()
             if now - lastUpdateTime > 0.05 {
@@ -1867,7 +1876,6 @@ class DelayedCameraView: UIView {
         } else if gesture.state == .ended || gesture.state == .cancelled {
             isDraggingHandle = false
             displayFrameAtPlayhead()
-
             UIView.animate(withDuration: 0.3) {
                 self.clipPlayhead.alpha = 1
                 self.playheadTouchArea.alpha = 1
@@ -2252,13 +2260,27 @@ extension DelayedCameraView: UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         let location = touch.location(in: timelineContainer)
         
-        // In clip mode, only handle touches on the clip playhead touch area
         if isClipMode {
-            return touch.view == playheadTouchArea
+            // Define a "hit zone" for the handles (including a bit of padding for easier grabbing)
+            let handlePadding: CGFloat = 15
+            let leftHitZone = leftTrimHandle.frame.insetBy(dx: -handlePadding, dy: -handlePadding)
+            let rightHitZone = rightTrimHandle.frame.insetBy(dx: -handlePadding, dy: -handlePadding)
+            
+            // If the touch is within the bounds of either handle...
+            if leftHitZone.contains(location) || rightHitZone.contains(location) {
+                // ...and this is the playhead's gesture, return false so the playhead doesn't steal the touch.
+                if gestureRecognizer.view == playheadTouchArea {
+                    return false
+                }
+                // Allow the handle's own gesture to proceed
+                return true
+            }
+            
+            // Otherwise, allow the playhead to be dragged anywhere else on the timeline
+            return gestureRecognizer.view == playheadTouchArea
         }
         
-        // In scrubber mode, handle ALL touches on the timeline
-        print("👆 Touch received at: \(location) on timeline")
+        // Scrubber mode logic
         return true
     }
 }
