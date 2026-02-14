@@ -2000,12 +2000,21 @@ class DelayedCameraView: UIView {
             return
         }
 
+        // Get the current rotation angle from the preview layer
+        let rotationAngle = previewLayer?.connection?.videoRotationAngle ?? 0
+        print("🔄 Creating clip with rotation angle: \(rotationAngle), isFrontCamera: \(isFrontCamera)")
+        
+        // Determine video dimensions based on rotation
+        let isRotated = rotationAngle == 90 || rotationAngle == 270
+        let videoWidth = isRotated ? 1080 : 1920
+        let videoHeight = isRotated ? 1920 : 1080
+
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: 1920,
-            AVVideoHeightKey: 1080,
+            AVVideoWidthKey: videoWidth,
+            AVVideoHeightKey: videoHeight,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 1920 * 1080 * 11,
+                AVVideoAverageBitRateKey: videoWidth * videoHeight * 11,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoExpectedSourceFrameRateKey: 30,
                 AVVideoMaxKeyFrameIntervalKey: 30
@@ -2017,8 +2026,8 @@ class DelayedCameraView: UIView {
 
         let sourcePixelBufferAttributes: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: 1920,
-            kCVPixelBufferHeightKey as String: 1080
+            kCVPixelBufferWidthKey as String: videoWidth,
+            kCVPixelBufferHeightKey as String: videoHeight
         ]
 
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
@@ -2057,8 +2066,12 @@ class DelayedCameraView: UIView {
                 var pixelBuffer: CVPixelBuffer?
 
                 videoFileBuffer.extractFrameFromFile(at: currentFrameIndex) { image in
-                    if let image = image, let buffer = self.pixelBuffer(from: image, size: CGSize(width: 1920, height: 1080)) {
-                        pixelBuffer = buffer
+                    if let image = image {
+                        // Apply rotation to the image before converting to pixel buffer
+                        let rotatedImage = self.rotateImage(image, by: rotationAngle, isFrontCamera: self.isFrontCamera)
+                        if let buffer = self.pixelBuffer(from: rotatedImage, size: CGSize(width: videoWidth, height: videoHeight)) {
+                            pixelBuffer = buffer
+                        }
                     }
                     semaphore.signal()
                 }
@@ -2091,6 +2104,51 @@ class DelayedCameraView: UIView {
                 }
             }
         }
+    }
+
+    private func rotateImage(_ image: UIImage, by angle: CGFloat, isFrontCamera: Bool) -> UIImage {
+        let radians = angle * .pi / 180
+        
+        // 1. Calculate the bounding box for the rotated image
+        let imgRect = CGRect(origin: .zero, size: image.size)
+        let rotatedRect = imgRect.applying(CGAffineTransform(rotationAngle: radians))
+        let targetSize = CGSize(width: abs(rotatedRect.width), height: abs(rotatedRect.height))
+
+        // 2. Start a new image context
+        UIGraphicsBeginImageContextWithOptions(targetSize, false, image.scale)
+        guard let context = UIGraphicsGetCurrentContext() else { return image }
+
+        // 3. Move origin to center
+        context.translateBy(x: targetSize.width / 2, y: targetSize.height / 2)
+        
+        // 4. Apply Rotation
+        // FIX: Back camera needs counter-clockwise (+) and Front needs clockwise (-)
+        if isFrontCamera {
+            context.rotate(by: -radians)
+        } else {
+            context.rotate(by: radians)
+        }
+        
+        // 5. Apply Mirroring for Front Camera ONLY
+        if isFrontCamera {
+            context.scaleBy(x: -1.0, y: 1.0)
+            print("🪞 Mirroring applied for front camera")
+        }
+
+        // 6. Draw the image centered
+        // image.draw(in:) is used here as it correctly handles the internal coordinate system
+        let drawRect = CGRect(x: -image.size.width / 2,
+                              y: -image.size.height / 2,
+                              width: image.size.width,
+                              height: image.size.height)
+        
+        image.draw(in: drawRect)
+
+        // 7. Retrieve the final image
+        let finalImage = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+
+        return finalImage ?? image
     }
 
     private func pixelBuffer(from image: UIImage, size: CGSize) -> CVPixelBuffer? {
