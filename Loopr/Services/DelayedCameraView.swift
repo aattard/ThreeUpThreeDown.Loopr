@@ -162,7 +162,7 @@ class DelayedCameraView: UIView {
         view.alpha = 0
 
         let config = UIImage.SymbolConfiguration(pointSize: 120, weight: .bold)
-        let imageView = UIImageView(image: UIImage(systemName: "photo.badge.checkmark.fill", withConfiguration: config))
+        let imageView = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: config))
         imageView.tintColor = .white
         imageView.contentMode = .center
         imageView.translatesAutoresizingMaskIntoConstraints = false
@@ -387,7 +387,7 @@ class DelayedCameraView: UIView {
     private let timeLabel: UILabel = {
         let label = UILabel()
         label.text = "LIVE"
-        label.font = .systemFont(ofSize: 14, weight: .semibold)
+        label.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
         label.textColor = .white
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
@@ -402,6 +402,16 @@ class DelayedCameraView: UIView {
         button.tintColor = .white
         button.translatesAutoresizingMaskIntoConstraints = false
         return button
+    }()
+    
+    // NEW: Top-right button container (pill-shaped)
+    private let topRightButtonContainer: UIView = {
+        let view = UIView()
+        view.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        view.layer.cornerRadius = 32 // Half of height for pill shape
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.alpha = 0
+        return view
     }()
 
     private let stopSessionButton: UIButton = {
@@ -554,23 +564,28 @@ class DelayedCameraView: UIView {
     private func setupControls() {
         addSubview(controlsContainer)
         addSubview(recordingIndicator)
-
+        
+        // NEW: Add top-right button container to main view
+        addSubview(topRightButtonContainer)
+        
         controlsContainer.addSubview(playPauseButton)
         controlsContainer.addSubview(timelineContainer)
         controlsContainer.addSubview(timeLabel)
         controlsContainer.addSubview(clipSaveButton)
-        controlsContainer.addSubview(restartButton)
-        controlsContainer.addSubview(stopSessionButton)
-
+        
+        // MOVED: Add restart and stop buttons to top-right container instead
+        topRightButtonContainer.addSubview(restartButton)
+        topRightButtonContainer.addSubview(stopSessionButton)
+        
         // Add scrubber background and playhead FIRST
         timelineContainer.addSubview(scrubberBackground)
         timelineContainer.addSubview(scrubberPlayhead)
         scrubberPlayhead.addSubview(scrubberPlayheadKnob)
         timelineContainer.addSubview(scrubberTouchArea)
-
+        
         // Add clip background
         timelineContainer.addSubview(clipRegionBackground)
-
+        
         // Add trim UI to timeline container
         timelineContainer.addSubview(leftDimView)
         timelineContainer.addSubview(rightDimView)
@@ -579,84 +594,86 @@ class DelayedCameraView: UIView {
         timelineContainer.addSubview(playheadTouchArea)
         timelineContainer.addSubview(leftTrimHandle)
         timelineContainer.addSubview(rightTrimHandle)
-
+        
         // Add playhead, knob, and touch area
         timelineContainer.addSubview(clipPlayhead)
         clipPlayhead.addSubview(clipPlayheadKnob)
-
+        
         playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
         stopSessionButton.addTarget(self, action: #selector(stopSessionTapped), for: .touchUpInside)
         clipSaveButton.addTarget(self, action: #selector(clipSaveButtonTapped), for: .touchUpInside)
         restartButton.addTarget(self, action: #selector(restartButtonTapped), for: .touchUpInside)
         cancelClipButton.addTarget(self, action: #selector(cancelClipTapped), for: .touchUpInside)
-
+        
         // Add pan gestures to trim handles
         let leftPan = UIPanGestureRecognizer(target: self, action: #selector(handleLeftTrimPan(_:)))
         leftTrimHandle.addGestureRecognizer(leftPan)
-
+        
         let rightPan = UIPanGestureRecognizer(target: self, action: #selector(handleRightTrimPan(_:)))
         rightTrimHandle.addGestureRecognizer(rightPan)
-
+        
         // Add pan gesture to playhead touch area
         let playheadPan = UIPanGestureRecognizer(target: self, action: #selector(handlePlayheadPan(_:)))
         playheadTouchArea.addGestureRecognizer(playheadPan)
-
-        // NEW: Add pan gesture to scrubber touch area
-        //let scrubberPan = UIPanGestureRecognizer(target: self, action: #selector(handleScrubberPan(_:)))
-        //scrubberPan.delegate = self
-        //scrubberTouchArea.addGestureRecognizer(scrubberPan)
+        
         let scrubberPan = UIPanGestureRecognizer(target: self, action: #selector(handleScrubberPan(_:)))
         scrubberPan.delegate = self
         timelineContainer.addGestureRecognizer(scrubberPan)
-
+        
         // Add tap gesture to timeline for jumping playhead
         let timelineTap = UITapGestureRecognizer(target: self, action: #selector(handleTimelineTap(_:)))
         timelineTap.cancelsTouchesInView = false
         timelineContainer.addGestureRecognizer(timelineTap)
-
+        
         NSLayoutConstraint.activate([
             // Recording indicator - top center
             recordingIndicator.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
             recordingIndicator.centerXAnchor.constraint(equalTo: centerXAnchor),
             recordingIndicator.heightAnchor.constraint(equalToConstant: 36),
             recordingIndicator.widthAnchor.constraint(greaterThanOrEqualToConstant: 100),
-
+            
+            // NEW: Top-right button container
+            topRightButtonContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            topRightButtonContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+            topRightButtonContainer.heightAnchor.constraint(equalToConstant: 64),
+            topRightButtonContainer.widthAnchor.constraint(equalToConstant: 108), // 44 + 10 spacing + 44 + 10 padding each side
+            
+            // Restart button (inside top-right container)
+            restartButton.leadingAnchor.constraint(equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
+            restartButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
+            restartButton.widthAnchor.constraint(equalToConstant: 44),
+            restartButton.heightAnchor.constraint(equalToConstant: 44),
+            
+            // Stop button (inside top-right container)
+            stopSessionButton.trailingAnchor.constraint(equalTo: topRightButtonContainer.trailingAnchor, constant: -10),
+            stopSessionButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
+            stopSessionButton.widthAnchor.constraint(equalToConstant: 44),
+            stopSessionButton.heightAnchor.constraint(equalToConstant: 44),
+            
             // Container - floated up from bottom with side padding
             controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
             controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             controlsContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
             controlsContainer.heightAnchor.constraint(equalToConstant: 80),
-
+            
             // Play/Pause button
             playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 20),
             playPauseButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             playPauseButton.widthAnchor.constraint(equalToConstant: 44),
             playPauseButton.heightAnchor.constraint(equalToConstant: 44),
-
+            
             // Clip/Save button
-            clipSaveButton.trailingAnchor.constraint(equalTo: restartButton.leadingAnchor, constant: -10),
+            clipSaveButton.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -20),
             clipSaveButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             clipSaveButton.widthAnchor.constraint(equalToConstant: 44),
             clipSaveButton.heightAnchor.constraint(equalToConstant: 44),
-
-            // Restart button
-            restartButton.trailingAnchor.constraint(equalTo: stopSessionButton.leadingAnchor, constant: -10),
-            restartButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
-            restartButton.widthAnchor.constraint(equalToConstant: 44),
-            restartButton.heightAnchor.constraint(equalToConstant: 44),
-
-            // Stop button
-            stopSessionButton.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -20),
-            stopSessionButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
-            stopSessionButton.widthAnchor.constraint(equalToConstant: 44),
-            stopSessionButton.heightAnchor.constraint(equalToConstant: 44),
-
+            
             // Time label
-            timeLabel.trailingAnchor.constraint(equalTo: clipSaveButton.leadingAnchor, constant: -15),
+            timeLabel.trailingAnchor.constraint(equalTo: clipSaveButton.leadingAnchor, constant: -5),
             timeLabel.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
-            timeLabel.widthAnchor.constraint(equalToConstant: 60),
-
-            // Timeline container
+            timeLabel.widthAnchor.constraint(equalToConstant: 50),
+            
+            // Timeline container (now extends further since restart/stop buttons are removed)
             timelineContainer.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 20),
             timelineContainer.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -20),
             timelineContainer.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
@@ -789,12 +806,14 @@ class DelayedCameraView: UIView {
     private func showControls() {
         UIView.animate(withDuration: 0.3) {
             self.controlsContainer.alpha = 1
+            self.topRightButtonContainer.alpha = 1  // ADD THIS LINE
         }
     }
 
     private func hideControls() {
         UIView.animate(withDuration: 0.3) {
             self.controlsContainer.alpha = 0
+            self.topRightButtonContainer.alpha = 0  // ADD THIS LINE
         }
     }
 
@@ -1048,7 +1067,7 @@ class DelayedCameraView: UIView {
         
         let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / 30.0
         DispatchQueue.main.async {
-            self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
+            self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
         }
         
         // FIX: Use cache for instant display during scrubbing (no async delay)
@@ -1181,7 +1200,7 @@ class DelayedCameraView: UIView {
                 
                 let secondsFromStart = Float(self.loopFrameIndex - startFrame) / 30.0
                 DispatchQueue.main.async {
-                    self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
+                    self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
                 }
             }
 
@@ -1376,6 +1395,7 @@ class DelayedCameraView: UIView {
                     self.bringSubviewToFront(self.cancelClipButton)
                     self.bringSubviewToFront(self.recordingIndicator)
                     self.bringSubviewToFront(self.controlsContainer)
+                    self.bringSubviewToFront(self.topRightButtonContainer)
                     print("✅ Preview layer added")
 
                     self.captureQueue.async {
@@ -1416,10 +1436,39 @@ class DelayedCameraView: UIView {
                 self.countdownLabel.text = "\(countdown)"
                 print("⏱️ Countdown: \(countdown)")
             } else {
+                /*
                 timer.invalidate()
                 self.countdownLabel.text = "🎬"
                 print("⏱️ Countdown complete!")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.switchToDelayedView()
+                }
+                */
+                timer.invalidate()
+                self.countdownLabel.text = ""
+                
+                // Add camera icon
+                let config = UIImage.SymbolConfiguration(pointSize: 120, weight: .bold)
+                let imageView = UIImageView(image: UIImage(systemName: "video.fill", withConfiguration: config))
+                imageView.tintColor = .white
+                imageView.contentMode = .center
+                imageView.translatesAutoresizingMaskIntoConstraints = false
+                imageView.tag = 1000 // Tag to remove it later
+                
+                self.countdownLabel.addSubview(imageView)
+                NSLayoutConstraint.activate([
+                    imageView.centerXAnchor.constraint(equalTo: self.countdownLabel.centerXAnchor),
+                    imageView.centerYAnchor.constraint(equalTo: self.countdownLabel.centerYAnchor),
+                    imageView.widthAnchor.constraint(equalToConstant: 100),
+                    imageView.heightAnchor.constraint(equalToConstant: 100)
+                ])
+                
+                print("⏱️ Countdown complete!")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    // Remove the icon before switching
+                    if let icon = self.countdownLabel.viewWithTag(1000) {
+                        icon.removeFromSuperview()
+                    }
                     self.switchToDelayedView()
                 }
             }
@@ -1575,9 +1624,11 @@ class DelayedCameraView: UIView {
                 self.updateScrubberPlayheadPosition()
                 
                 let secondsFromStart = Float(self.scrubberPosition - oldestAllowedIndex) / 30.0
-                self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
+                self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
             }
         }
+        
+        self.showControls()
     }
 
     func stopSession() {
@@ -1585,44 +1636,42 @@ class DelayedCameraView: UIView {
         isActive = false
         isShowingDelayed = false
         isPaused = false
-
         stopRecordingIndicator()
         stopLoop()
-
+        
         displayTimer?.invalidate()
         displayTimer = nil
         hideControlsTimer?.invalidate()
         hideControlsTimer = nil
-
+        
         captureQueue.async { [weak self] in
             guard let self = self else { return }
-
             if self.captureSession?.isRunning == true {
                 self.captureSession?.stopRunning()
                 print("✅ Capture session stopped")
             }
-
+            
             DispatchQueue.main.async {
                 self.previewLayer?.removeFromSuperlayer()
                 self.captureSession = nil
                 self.videoDataOutput = nil
                 self.previewLayer = nil
                 self.controlsContainer.alpha = 0
+                self.topRightButtonContainer.alpha = 0  // ADD THIS LINE
                 self.countdownStopButton.alpha = 0
                 self.livePauseButton.alpha = 0
-
                 self.onSessionStopped?()
             }
-
+            
             self.videoFileBuffer?.stopWriting {
                 print("✅ Video file buffer stopped")
             }
         }
-
+        
         metadataLock.lock()
         frameMetadata.removeAll()
         metadataLock.unlock()
-
+        
         displayImageView.image = nil
     }
 
@@ -1772,7 +1821,7 @@ class DelayedCameraView: UIView {
             
             let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / 30.0
             DispatchQueue.main.async {
-                self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
+                self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
             }
         }
         
