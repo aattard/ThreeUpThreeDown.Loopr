@@ -36,12 +36,14 @@ class VideoFileBuffer {
     private let maxCacheSize: Int
     
     // MARK: - Initialization
-    init(maxDurationSeconds: Int, writeQueue: DispatchQueue) {
+    init(maxDurationSeconds: Int, delaySeconds: Int, writeQueue: DispatchQueue) {
         self.maxDurationSeconds = maxDurationSeconds
         self.writeQueue = writeQueue
         
-        // Keep full duration in cache
-        self.maxCacheSize = maxDurationSeconds * 30
+        // PHASE 1 OPTIMIZED:
+        // - Keep full 30 seconds for SCRUBBING (when paused)
+        // - Delayed feed only needs delaySeconds (uses ring buffer separately if we add it back)
+        self.maxCacheSize = 60 * 30  // 900 frames for 30s scrubbing
         
         let tempDir = fileManager.temporaryDirectory
         self.currentFileURL = tempDir.appendingPathComponent("buffer_main.mp4")
@@ -257,13 +259,21 @@ class VideoFileBuffer {
         cacheLock.unlock()
     }
     
-    // Get frame from memory cache with ring buffer indexing
     func getRecentFrame(at globalIndex: Int) -> UIImage? {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         
-        // Convert global index to cache index
-        let cacheIndex = globalIndex - cacheStartIndex
+        // The cache holds the MOST RECENT maxCacheSize frames
+        let totalFramesWritten = globalFrameCount
+        let oldestFrameInCache = max(0, totalFramesWritten - maxCacheSize)
+        
+        // Check if requested frame is in cache range
+        guard globalIndex >= oldestFrameInCache && globalIndex < totalFramesWritten else {
+            return nil
+        }
+        
+        // Convert global index to cache array index
+        let cacheIndex = globalIndex - oldestFrameInCache
         
         guard cacheIndex >= 0 && cacheIndex < recentFramesCache.count else {
             return nil
@@ -361,7 +371,7 @@ class VideoFileBuffer {
             return
         }
         
-        // First try cache for recent frames
+        // First try cache for recent frames (this covers frames that might not be in the file)
         if let cachedImage = getRecentFrame(at: frameIndex) {
             completion(cachedImage)
             return
@@ -373,17 +383,27 @@ class VideoFileBuffer {
             self.timestampLock.lock()
             guard frameIndex < self.frameTimestamps.count else {
                 self.timestampLock.unlock()
-                completion(nil)
+                // Frame index out of range, try cache one more time
+                if let cachedImage = self.getRecentFrame(at: frameIndex) {
+                    DispatchQueue.main.async {
+                        completion(cachedImage)
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        completion(nil)
+                    }
+                }
                 return
             }
+            
             let timestamp = self.frameTimestamps[frameIndex]
             self.timestampLock.unlock()
             
             // Extract frame using AVAssetImageGenerator
             let asset = AVAsset(url: fileURL)
             let imageGenerator = AVAssetImageGenerator(asset: asset)
-            imageGenerator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 30)
-            imageGenerator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 30)
+            imageGenerator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: Int32(self.fps))
+            imageGenerator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: Int32(self.fps))
             imageGenerator.appliesPreferredTrackTransform = true
             
             do {
@@ -393,9 +413,17 @@ class VideoFileBuffer {
                     completion(image)
                 }
             } catch {
-                print("❌ Frame extraction error at index \(frameIndex): \(error)")
-                DispatchQueue.main.async {
-                    completion(nil)
+                // File extraction failed - try cache as last resort
+                if let cachedImage = self.getRecentFrame(at: frameIndex) {
+                    DispatchQueue.main.async {
+                        completion(cachedImage)
+                    }
+                } else {
+                    // Only log error if cache also fails
+                    print("❌ Frame extraction error at index \(frameIndex): \(error)")
+                    DispatchQueue.main.async {
+                        completion(nil)
+                    }
                 }
             }
         }

@@ -428,9 +428,20 @@ class DelayedCameraView: UIView {
     // Cancel button (in clip mode, top left)
     private let cancelClipButton: UIButton = {
         let button = UIButton(type: .system)
+        
+        // Pill background (like live recording indicator)
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        button.layer.cornerRadius = 18  // Half of height for pill shape
+        button.clipsToBounds = true
+        
+        // Text styling
         button.setTitle("Cancel", for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
         button.setTitleColor(.white, for: .normal)
+        
+        // Padding around text
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        
         button.translatesAutoresizingMaskIntoConstraints = false
         button.isHidden = true
         return button
@@ -446,6 +457,9 @@ class DelayedCameraView: UIView {
 
     // Constants for handle width
     private let handleWidth: CGFloat = 20
+    
+    // Always scrub 60 seconds
+    private let scrubDurationSeconds: Int = 60
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -936,9 +950,13 @@ class DelayedCameraView: UIView {
         frameMetadata.removeAll()
         metadataLock.unlock()
 
-        let maxDuration = 30 + delaySeconds + 10
-        videoFileBuffer = VideoFileBuffer(maxDurationSeconds: maxDuration, writeQueue: captureQueue)
-
+        let maxDuration = 60 + delaySeconds + 10  // 60s scrub + delay + 10s buffer
+        
+        videoFileBuffer = VideoFileBuffer(
+            maxDurationSeconds: maxDuration,
+            delaySeconds: delaySeconds,
+            writeQueue: captureQueue
+        )
         videoDataOutput?.setSampleBufferDelegate(self, queue: captureQueue)
 
         let videoWidth = 1920
@@ -965,7 +983,6 @@ class DelayedCameraView: UIView {
     }
 
 
-    // NEW: Handle scrubber panning (replaces slider)
     @objc private func handleScrubberPan(_ gesture: UIPanGestureRecognizer) {
         if gesture.state == .began {
             print("🎯 Scrubber pan BEGAN at location: \(gesture.location(in: timelineContainer))")
@@ -975,40 +992,42 @@ class DelayedCameraView: UIView {
         }
         
         let location = gesture.location(in: timelineContainer)
-
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
         guard totalFrames >= requiredFrames else {
             print("⚠️ Not enough frames: \(totalFrames) < \(requiredFrames)")
             return
         }
-
+        
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+        
+        // PHASE 1: Use actual cache size for scrub range
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
         let scrubRange = pausePointIndex - oldestAllowedIndex
+        
         let timelineWidth = timelineContainer.bounds.width
-
         guard scrubRange > 0, timelineWidth > 0 else {
             print("⚠️ Invalid range or width: scrubRange=\(scrubRange), width=\(timelineWidth)")
             return
         }
-
-        // Clamp location within timeline bounds
+        
         let clampedX = max(0, min(location.x, timelineWidth))
         let normalizedPosition = clampedX / timelineWidth
-
         let frameIndex = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
         
-        // Ensure scrubberPosition stays within valid range
         let beforeClamp = frameIndex
         scrubberPosition = max(oldestAllowedIndex, min(frameIndex, pausePointIndex))
         
-        // FIX: Ensure position is at least 1 to avoid index 0 errors
         let beforeMinClamp = scrubberPosition
         scrubberPosition = max(1, scrubberPosition)
         
@@ -1018,31 +1037,48 @@ class DelayedCameraView: UIView {
             print("   timelineWidth: \(timelineWidth)")
             print("   normalizedPosition: \(normalizedPosition)")
             print("   oldestAllowed: \(oldestAllowedIndex), pausePoint: \(pausePointIndex)")
-            print("   scrubRange: \(scrubRange)")
+            //print("   scrubRange: \(scrubRange), cacheSize: \(cacheFrameCount)")
             print("   frameIndex (before clamp): \(beforeClamp)")
             print("   after range clamp: \(beforeMinClamp)")
             print("   FINAL scrubberPosition: \(scrubberPosition)")
         }
         
         loopFrameIndex = scrubberPosition
-
         updateScrubberPlayheadPosition()
-
-        // Show time from the START of the scrubable range, not from pause point
+        
         let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / 30.0
         DispatchQueue.main.async {
             self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
         }
-
-        let currentTime = CACurrentMediaTime()
-        if gesture.state == .changed && currentTime - lastUpdateTime < 0.05 {
-            return
-        }
-        lastUpdateTime = currentTime
-
-        videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
-            guard let self = self, let image = image else { return }
-            self.displayFrame(image)
+        
+        // FIX: Use cache for instant display during scrubbing (no async delay)
+        if let cachedImage = videoFileBuffer?.getRecentFrame(at: scrubberPosition) {
+            displayFrame(cachedImage)
+        } else {
+            // Fallback to file extraction only if not in cache
+            // But don't throttle on .began or .ended
+            if gesture.state == .began || gesture.state == .ended {
+                videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
+                    guard let self = self, let image = image else { return }
+                    // Only display if we're still at this position
+                    if self.scrubberPosition == scrubberPosition {
+                        self.displayFrame(image)
+                    }
+                }
+            } else {
+                // During .changed, throttle file extraction
+                let currentTime = CACurrentMediaTime()
+                if currentTime - lastUpdateTime >= 0.05 {
+                    lastUpdateTime = currentTime
+                    videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
+                        guard let self = self, let image = image else { return }
+                        // Only display if we're still at this position
+                        if self.scrubberPosition == scrubberPosition {
+                            self.displayFrame(image)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1050,35 +1086,43 @@ class DelayedCameraView: UIView {
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
         guard totalFrames >= requiredFrames else { return }
-
+        
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+        
+        // PHASE 1: Use actual cache size, not hardcoded
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
+
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
         let scrubRange = pausePointIndex - oldestAllowedIndex
-
+        
         guard scrubRange > 0 else { return }
-
+        
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
-
-        let normalizedPosition = CGFloat(scrubberPosition - oldestAllowedIndex) / CGFloat(scrubRange)
+        
+        // Clamp scrubberPosition to valid range
+        let clampedPosition = max(oldestAllowedIndex, min(scrubberPosition, pausePointIndex))
+        
+        let normalizedPosition = CGFloat(clampedPosition - oldestAllowedIndex) / CGFloat(scrubRange)
         let playheadX = normalizedPosition * timelineWidth
-
+        
         scrubberPlayheadConstraint?.constant = playheadX
         
         // Update touch area constraint to center it on the playhead
-        // BUT clamp it so the touch area stays within bounds
         let idealTouchAreaX = playheadX - 22  // Center 44px touch area on playhead
         let clampedTouchAreaX = max(0, min(idealTouchAreaX, timelineWidth - 44))
-        
         scrubberTouchAreaConstraint?.constant = clampedTouchAreaX
         
-        print("🎯 Touch area update: playheadX=\(playheadX), idealX=\(idealTouchAreaX), clampedX=\(clampedTouchAreaX), timelineWidth=\(timelineWidth)")
-
         timelineContainer.layoutIfNeeded()
+        
+        //validatePlayheadSync()
     }
 
     private func startLoop() {
@@ -1097,9 +1141,15 @@ class DelayedCameraView: UIView {
         guard totalFrames >= requiredFrames else { return }
 
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+        
+        // PHASE 1: Use actual cache size instead of hardcoded 30*30
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
         let startFrame: Int
         let endFrame: Int
 
@@ -1108,9 +1158,9 @@ class DelayedCameraView: UIView {
             endFrame = clipEndIndex
             loopFrameIndex = clipPlayheadPosition
         } else {
-            startFrame = max(1, oldestAllowedIndex)  // FIX: Ensure at least 1
+            startFrame = oldestAllowedIndex
             endFrame = pausePointIndex
-            loopFrameIndex = max(1, scrubberPosition)  // FIX: Ensure at least 1
+            loopFrameIndex = max(1, scrubberPosition)
         }
 
         loopTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in
@@ -1202,8 +1252,13 @@ class DelayedCameraView: UIView {
         self.isFrontCamera = useFrontCamera
         self.isPaused = false
 
-        let maxDuration = 30 + delaySeconds + 10
-        videoFileBuffer = VideoFileBuffer(maxDurationSeconds: maxDuration, writeQueue: captureQueue)
+        let maxDuration = 60 + delaySeconds + 10  // 60s scrub + delay + 10s buffer
+
+        videoFileBuffer = VideoFileBuffer(
+            maxDurationSeconds: maxDuration,
+            delaySeconds: delaySeconds,
+            writeQueue: captureQueue
+        )
 
         metadataLock.lock()
         frameMetadata.removeAll()
@@ -1442,60 +1497,87 @@ class DelayedCameraView: UIView {
             displayImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
         }
 
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
             self.displayImageView.image = displayImage
             if self.isFrontCamera {
                 self.displayImageView.transform = CGAffineTransform(scaleX: -1, y: 1)
             } else {
                 self.displayImageView.transform = .identity
             }
+            
+            // FIX: Track what frame we're actually displaying
+            if self.isClipMode {
+                self.currentDisplayFrameIndex = self.clipPlayheadPosition
+            } else if self.isPaused {
+                self.currentDisplayFrameIndex = self.scrubberPosition
+            }
+        }
+    }
+    
+    private func validatePlayheadSync() {
+        let displayedFrame = currentDisplayFrameIndex
+        let expectedFrame = isClipMode ? clipPlayheadPosition : scrubberPosition
+        
+        if displayedFrame != expectedFrame {
+            print("⚠️ FRAME MISMATCH - Displayed: \(displayedFrame), Expected: \(expectedFrame), Mode: \(isClipMode ? "Clip" : "Scrub")")
         }
     }
 
     func pausePlayback() {
+        guard isShowingDelayed, !isPaused else { return }
+        
         print("⏸️ Paused - Stopping capture")
+        
         isPaused = true
-
-        // HIDE live indicator when paused
+        displayTimer?.invalidate()
+        displayTimer = nil
+        
         stopRecordingIndicator()
         hideLivePauseButton()
-
-        displayTimer?.fireDate = Date.distantFuture
-        videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
-
-        videoFileBuffer?.pauseRecording { [weak self] fileURL in
-            guard let self = self else { return }
-            if fileURL != nil {
-                print("✅ File ready for scrubbing")
-            } else {
-                print("⚠️ File not ready, scrubbing may not work")
-            }
-        }
-
-        // Show the actual time at the pause point (end of scrubable range)
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
-        if totalFrames >= requiredFrames {
-            let pausePointIndex = totalFrames - requiredFrames
-            let scrubBackFrames = 30 * 30
-            let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
-            let durationSeconds = Float(pausePointIndex - oldestAllowedIndex) / 30.0
-            timeLabel.text = String(format: "%.1fs", durationSeconds)
-            
-            scrubberPosition = pausePointIndex
-            loopFrameIndex = pausePointIndex
-            
-            // Position the scrubber playhead at the end (most recent frame)
-            updateScrubberPlayheadPosition()
-        } else {
-            timeLabel.text = "0.0s"
+        guard totalFrames >= requiredFrames else {
+            print("⚠️ Not enough frames to pause")
+            return
         }
+        
+        let pausePointIndex = totalFrames - requiredFrames
+        scrubberPosition = pausePointIndex
+        loopFrameIndex = pausePointIndex
+        
+        // PHASE 1: Use actual cache size for scrub range
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
-        showControls()
-        hideControlsTimer?.invalidate()
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
+        
+        //print("📍 Paused at frame \(pausePointIndex) (oldest: \(oldestAllowedIndex), cache: \(cacheFrameCount) frames, ~\(cacheFrameCount/30)s)")
+        
+        videoFileBuffer?.pauseRecording { [weak self] fileURL in
+            guard let self = self else { return }
+            
+            if fileURL != nil {
+                print("✅ File ready for scrubbing")
+            } else {
+                print("⚠️ Pause completed but file may not be ready")
+            }
+            
+            DispatchQueue.main.async {
+                self.showControls()
+                self.updateScrubberPlayheadPosition()
+                
+                let secondsFromStart = Float(self.scrubberPosition - oldestAllowedIndex) / 30.0
+                self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
+            }
+        }
     }
 
     func stopSession() {
@@ -1545,7 +1627,6 @@ class DelayedCameraView: UIView {
     }
 
     // MARK: - Clip Selection Methods
-
     private func enterClipMode() {
         print("✂️ Entering clip mode")
         isClipMode = true
@@ -1561,8 +1642,15 @@ class DelayedCameraView: UIView {
         }
 
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+        
+        // PHASE 1: Use actual cache size instead of hardcoded 30*30
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
+
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
 
         // FIX: Ensure we have a valid range before entering clip mode
         guard pausePointIndex > oldestAllowedIndex else {
@@ -1570,12 +1658,15 @@ class DelayedCameraView: UIView {
             return
         }
 
+        print("✂️ Clip range: \(oldestAllowedIndex) to \(pausePointIndex) (\(scrubBackFrames) frames, ~\(scrubBackFrames/30)s)")
+
         // NEW: Default to FULL RANGE (start to end)
         clipStartIndex = oldestAllowedIndex
         clipEndIndex = pausePointIndex
 
-        clipPlayheadPosition = clipStartIndex
-        loopFrameIndex = clipStartIndex
+        // FIX: Set playhead to the current scrubber position instead of start
+        clipPlayheadPosition = scrubberPosition
+        loopFrameIndex = clipPlayheadPosition
 
         // Transform button to save icon
         let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
@@ -1612,6 +1703,7 @@ class DelayedCameraView: UIView {
         updatePlayheadPosition()
         updateTimeLabel()
 
+        // FIX: Display the frame at the current playhead position immediately
         displayFrameAtPlayhead()
     }
 
@@ -1626,6 +1718,11 @@ class DelayedCameraView: UIView {
     }
 
     private func exitClipMode() {
+        print("❌ Exiting clip mode")
+        
+        // FIX: Sync scrubber position with current clip playhead before exiting
+        scrubberPosition = clipPlayheadPosition
+        
         isClipMode = false
 
         // Transform button back to edit icon
@@ -1635,13 +1732,6 @@ class DelayedCameraView: UIView {
         clipSaveButton.tintColor = .white
 
         UIView.animate(withDuration: 0.3) {
-            // Show scrubber
-            self.scrubberBackground.alpha = 1
-            self.scrubberPlayhead.alpha = 1
-
-            // Hide purple background
-            self.clipRegionBackground.isHidden = true
-
             // Hide clip UI
             self.leftDimView.isHidden = true
             self.rightDimView.isHidden = true
@@ -1651,41 +1741,85 @@ class DelayedCameraView: UIView {
             self.rightTrimHandle.isHidden = true
             self.clipPlayhead.isHidden = true
             self.playheadTouchArea.isHidden = true
+            self.clipRegionBackground.isHidden = true
+
+            // Show scrubber
+            self.scrubberBackground.alpha = 1
+            self.scrubberPlayhead.alpha = 1
 
             // Hide cancel button
             self.cancelClipButton.isHidden = true
+        }
+        
+        // FIX: Update scrubber to show current position
+        updateScrubberPlayheadPosition()
+        
+        // FIX: Calculate correct time label for scrubber mode
+        metadataLock.lock()
+        let totalFrames = frameMetadata.count
+        metadataLock.unlock()
+        
+        let requiredFrames = delaySeconds * 30
+        if totalFrames >= requiredFrames {
+            let pausePointIndex = totalFrames - requiredFrames  // ADD THIS LINE
+            let scrubBackFrames = scrubDurationSeconds * 30
+            let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
-            // Keep recording indicator hidden (we're still paused)
+            // Can't go older than what's in cache
+            let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+            let oldestInCache = max(1, totalFrames - cacheSize)
+            let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
+            
+            let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / 30.0
+            DispatchQueue.main.async {
+                self.timeLabel.text = String(format: "%.1fs", secondsFromStart)
+            }
+        }
+        
+        // FIX: Display the frame at the scrubber position
+        videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
+            guard let self = self, let image = image else { return }
+            self.displayFrame(image)
         }
     }
 
     private func updateClipHandlePositions() {
-        // FIX: Only update handle positions when in clip mode
         guard isClipMode else { return }
         
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
-        guard totalFrames >= requiredFrames else { return }
-
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
+        
+        // PHASE 1: Use actual cache size for the range
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
-        guard scrubRange > 0 else { return }
-
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
+        
+        let totalClipRange = pausePointIndex - oldestAllowedIndex
+        guard totalClipRange > 0 else { return }
+        
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
-
-        let leftPosition = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth
-        let rightPosition = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth
-
+        
+        // Calculate normalized positions (0.0 to 1.0) within the scrub range
+        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        
+        // Convert to pixel positions
+        let leftPosition = leftNormalized * timelineWidth
+        let rightPosition = rightNormalized * timelineWidth
+        
+        // Update constraints
         leftHandleConstraint?.constant = leftPosition
         rightHandleConstraint?.constant = -(timelineWidth - rightPosition)
-
+        
         timelineContainer.layoutIfNeeded()
     }
 
@@ -1696,49 +1830,65 @@ class DelayedCameraView: UIView {
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
         guard totalFrames >= requiredFrames else { return }
-
+        
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
+        
+        // PHASE 1: Use actual cache size
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
-        guard scrubRange > 0 else { return }
-
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
+        
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
-
-        let leftHandleRightEdge = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth + handleWidth
-        let rightHandleLeftEdge = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth - handleWidth
-
+        
+        // Calculate handle positions within the timeline
+        let totalClipRange = pausePointIndex - oldestAllowedIndex
+        guard totalClipRange > 0 else { return }
+        
+        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        
+        let leftPosition = leftNormalized * timelineWidth
+        let rightPosition = rightNormalized * timelineWidth
+        
+        let leftHandleRightEdge = leftPosition + handleWidth
+        let rightHandleLeftEdge = rightPosition - handleWidth
         let clipRegionWidth = rightHandleLeftEdge - leftHandleRightEdge
-
+        
         // Guard against division by zero
         guard clipEndIndex > clipStartIndex else {
             print("⚠️ Invalid clip range: start=\(clipStartIndex) end=\(clipEndIndex)")
             return
         }
-
+        
+        // Calculate playhead position within the clip region
         let normalizedPlayheadPosition = CGFloat(clipPlayheadPosition - clipStartIndex) / CGFloat(clipEndIndex - clipStartIndex)
         let playheadPosition = leftHandleRightEdge + (normalizedPlayheadPosition * clipRegionWidth)
-
+        
         // Verify the position is valid before setting constraint
         guard playheadPosition.isFinite else {
             print("⚠️ Invalid playhead position calculated: \(playheadPosition)")
             return
         }
-
+        
         playheadConstraint?.constant = playheadPosition
-
+        
         // Clamp touch area within timeline bounds
         let touchAreaWidth: CGFloat = 44
         let idealTouchX = playheadPosition - (touchAreaWidth / 2)
         let clampedTouchX = max(0, min(idealTouchX, timelineWidth - touchAreaWidth))
         playheadTouchArea.frame.origin.x = clampedTouchX
-
+        
         timelineContainer.layoutIfNeeded()
+        
+        //validatePlayheadSync()
     }
 
     private func updateTimeLabel() {
@@ -1752,9 +1902,22 @@ class DelayedCameraView: UIView {
     }
 
     private func displayFrameAtPlayhead() {
+        guard isClipMode else { return }
+        
+        // Extract and display the frame at the current playhead position
         videoFileBuffer?.extractFrameFromFile(at: clipPlayheadPosition) { [weak self] image in
-            guard let self = self, let image = image else { return }
-            self.displayFrame(image)
+            guard let self = self else { return }
+            
+            if let image = image {
+                self.displayFrame(image)
+            } else {
+                // FIX: If file extraction fails, try getting from cache
+                if let cachedImage = self.videoFileBuffer?.getRecentFrame(at: self.clipPlayheadPosition) {
+                    self.displayFrame(cachedImage)
+                } else {
+                    print("⚠️ Could not display frame at index \(self.clipPlayheadPosition)")
+                }
+            }
         }
     }
 
@@ -1762,59 +1925,85 @@ class DelayedCameraView: UIView {
         let translation = gesture.translation(in: timelineContainer)
         
         if gesture.state == .began {
-            // PAUSE ON DRAG
             if isLooping {
                 stopLoop()
             }
-            
             isDraggingHandle = true
             initialLeftPosition = leftHandleConstraint?.constant ?? 0
             initialClipStartIndex = clipStartIndex
             
-            // Hide playhead for visual clarity during drag
             self.clipPlayhead.alpha = 0
             self.playheadTouchArea.alpha = 0
         }
-
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
         guard totalFrames >= requiredFrames else { return }
-
+        
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
+        
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
+        let scrubRange = pausePointIndex - oldestAllowedIndex
+        
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
-
+        
         let newLeftPosition = initialLeftPosition + translation.x
         let normalizedPosition = max(0, min(newLeftPosition / timelineWidth, 1.0))
         let newStartFrame = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
-
+        
         let minStartFrame = oldestAllowedIndex
         let maxStartFrame = clipEndIndex - 30
-
+        
         clipStartIndex = max(minStartFrame, min(newStartFrame, maxStartFrame))
         clipPlayheadPosition = clipStartIndex
-
+        
         updateClipHandlePositions()
         updatePlayheadPosition()
         updateTimeLabel()
-
+        
+        // FIX: Use cache during dragging with throttling
         if gesture.state == .changed {
             let now = CACurrentMediaTime()
             if now - lastUpdateTime > 0.05 {
                 lastUpdateTime = now
-                displayFrameAtPlayhead()
+                let targetPosition = clipPlayheadPosition
+                if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
+                    displayFrame(cachedImage)
+                } else {
+                    videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
+                        guard let self = self, let image = image else { return }
+                        if self.clipPlayheadPosition == targetPosition {
+                            self.displayFrame(image)
+                        }
+                    }
+                }
             }
         } else if gesture.state == .ended || gesture.state == .cancelled {
             isDraggingHandle = false
-            displayFrameAtPlayhead()
-
+            
+            // FIX: Final frame display without throttling
+            let targetPosition = clipPlayheadPosition
+            if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
+                displayFrame(cachedImage)
+            } else {
+                videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
+                    guard let self = self, let image = image else { return }
+                    if self.clipPlayheadPosition == targetPosition {
+                        self.displayFrame(image)
+                    }
+                }
+            }
+            
             UIView.animate(withDuration: 0.3) {
                 self.clipPlayhead.alpha = 1
                 self.playheadTouchArea.alpha = 1
@@ -1826,7 +2015,9 @@ class DelayedCameraView: UIView {
         let translation = gesture.translation(in: timelineContainer)
         
         if gesture.state == .began {
-            if isLooping { stopLoop() }
+            if isLooping {
+                stopLoop()
+            }
             isDraggingHandle = true
             initialRightPosition = rightHandleConstraint?.constant ?? 0
             initialClipEndIndex = clipEndIndex
@@ -1840,42 +2031,66 @@ class DelayedCameraView: UIView {
         guard totalFrames >= requiredFrames else { return }
         
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
+        
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
+
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
         let scrubRange = pausePointIndex - oldestAllowedIndex
+        
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
         
-        // FIX: Calculate the handle's X position relative to the LEFT edge
-        // Since initialRightPosition is a trailing constant (negative or 0),
-        // the distance from the left is: timelineWidth + constant + translation
         let currentXFromLeft = timelineWidth + initialRightPosition + translation.x
-        
-        // Normalize based on the full width
         let normalizedPosition = max(0, min(currentXFromLeft / timelineWidth, 1.0))
-        
         let newEndFrame = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
         
-        // Ensure the clip is at least 1 second (30 frames) long
         let minEndFrame = clipStartIndex + 30
         let maxEndFrame = pausePointIndex
         
         clipEndIndex = max(minEndFrame, min(newEndFrame, maxEndFrame))
-        clipPlayheadPosition = clipEndIndex // Update playhead to follow the drag
+        clipPlayheadPosition = clipEndIndex
         
         updateClipHandlePositions()
         updatePlayheadPosition()
         updateTimeLabel()
         
+        // FIX: Use cache during dragging with throttling
         if gesture.state == .changed {
             let now = CACurrentMediaTime()
             if now - lastUpdateTime > 0.05 {
                 lastUpdateTime = now
-                displayFrameAtPlayhead()
+                let targetPosition = clipPlayheadPosition
+                if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
+                    displayFrame(cachedImage)
+                } else {
+                    videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
+                        guard let self = self, let image = image else { return }
+                        if self.clipPlayheadPosition == targetPosition {
+                            self.displayFrame(image)
+                        }
+                    }
+                }
             }
         } else if gesture.state == .ended || gesture.state == .cancelled {
             isDraggingHandle = false
-            displayFrameAtPlayhead()
+            
+            // FIX: Final frame display without throttling
+            let targetPosition = clipPlayheadPosition
+            if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
+                displayFrame(cachedImage)
+            } else {
+                videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
+                    guard let self = self, let image = image else { return }
+                    if self.clipPlayheadPosition == targetPosition {
+                        self.displayFrame(image)
+                    }
+                }
+            }
+            
             UIView.animate(withDuration: 0.3) {
                 self.clipPlayhead.alpha = 1
                 self.playheadTouchArea.alpha = 1
@@ -1885,80 +2100,123 @@ class DelayedCameraView: UIView {
 
     @objc private func handlePlayheadPan(_ gesture: UIPanGestureRecognizer) {
         let translation = gesture.translation(in: timelineContainer)
-
+        
         if gesture.state == .began {
             initialPlayheadPosition = playheadConstraint?.constant ?? 0
             initialClipPlayheadPosition = clipPlayheadPosition
         }
-
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
         guard totalFrames >= requiredFrames else { return }
-
+        
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
+        
+        // PHASE 1: Use actual cache size
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
+        
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
-
-        let leftHandleRightEdge = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth + handleWidth
-        let rightHandleLeftEdge = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth - handleWidth
+        
+        // Calculate handle positions
+        let totalClipRange = pausePointIndex - oldestAllowedIndex
+        guard totalClipRange > 0 else { return }
+        
+        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        
+        let leftPosition = leftNormalized * timelineWidth
+        let rightPosition = rightNormalized * timelineWidth
+        
+        let leftHandleRightEdge = leftPosition + handleWidth
+        let rightHandleLeftEdge = rightPosition - handleWidth
         let clipRegionWidth = rightHandleLeftEdge - leftHandleRightEdge
-
+        
         let newPlayheadX = initialPlayheadPosition + translation.x
         let clampedX = max(leftHandleRightEdge, min(newPlayheadX, rightHandleLeftEdge))
-
+        
         let normalizedPosition = (clampedX - leftHandleRightEdge) / clipRegionWidth
         clipPlayheadPosition = clipStartIndex + Int(normalizedPosition * CGFloat(clipEndIndex - clipStartIndex))
-
         clipPlayheadPosition = max(clipStartIndex, min(clipPlayheadPosition, clipEndIndex))
-
+        
         updatePlayheadPosition()
         updateTimeLabel()
-
-        displayFrameAtPlayhead()
+        
+        // FIX: Use cache for instant display, with position check
+        let targetPosition = clipPlayheadPosition
+        if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
+            displayFrame(cachedImage)
+        } else {
+            // Fallback to file extraction
+            videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
+                guard let self = self, let image = image else { return }
+                // Only display if we're still at this position
+                if self.clipPlayheadPosition == targetPosition {
+                    self.displayFrame(image)
+                }
+            }
+        }
     }
 
     @objc private func handleTimelineTap(_ gesture: UITapGestureRecognizer) {
         guard isClipMode else { return }
-
+        
         let location = gesture.location(in: timelineContainer)
-
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
-
+        
         let requiredFrames = delaySeconds * 30
         guard totalFrames >= requiredFrames else { return }
-
+        
         let pausePointIndex = totalFrames - requiredFrames
-        let scrubBackFrames = 30 * 30
-        let oldestAllowedIndex = max(0, pausePointIndex - scrubBackFrames)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
+        
+        // PHASE 1: Use actual cache size
+        let scrubBackFrames = scrubDurationSeconds * 30
+        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
+        // Can't go older than what's in cache
+        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
+        let oldestInCache = max(1, totalFrames - cacheSize)
+        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
+        
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
-
-        let leftHandleRightEdge = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth + handleWidth
-        let rightHandleLeftEdge = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(scrubRange) * timelineWidth - handleWidth
-
+        
+        // Calculate handle positions
+        let totalClipRange = pausePointIndex - oldestAllowedIndex
+        guard totalClipRange > 0 else { return }
+        
+        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
+        
+        let leftPosition = leftNormalized * timelineWidth
+        let rightPosition = rightNormalized * timelineWidth
+        
+        let leftHandleRightEdge = leftPosition + handleWidth
+        let rightHandleLeftEdge = rightPosition - handleWidth
+        
         guard location.x >= leftHandleRightEdge && location.x <= rightHandleLeftEdge else { return }
-
+        
         let clipRegionWidth = rightHandleLeftEdge - leftHandleRightEdge
         let normalizedPosition = (location.x - leftHandleRightEdge) / clipRegionWidth
-
         clipPlayheadPosition = clipStartIndex + Int(normalizedPosition * CGFloat(clipEndIndex - clipStartIndex))
         clipPlayheadPosition = max(clipStartIndex, min(clipPlayheadPosition, clipEndIndex))
-
+        
         updatePlayheadPosition()
         updateTimeLabel()
         displayFrameAtPlayhead()
-
+        
         print("🎯 Playhead jumped to frame \(clipPlayheadPosition)")
     }
 
