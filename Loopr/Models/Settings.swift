@@ -11,6 +11,8 @@ class Settings {
     
     private let keyBackCameraZoom = "backCameraZoom"
     private let keyFrontCameraZoom = "frontCameraZoom"
+    private let keyBackCameraFPS = "backCameraFPS"
+    private let keyFrontCameraFPS = "frontCameraFPS"
     
     var playbackDelay: Int {
         get {
@@ -60,6 +62,28 @@ class Settings {
             defaults.set(Double(newValue), forKey: keyFrontCameraZoom)
         }
     }
+    
+    var backCameraFPS: Int {
+        get {
+            // Always return 30fps - the only supported frame rate
+            return 30
+        }
+        set {
+            // Accept but always store 30fps
+            defaults.set(30, forKey: keyBackCameraFPS)
+        }
+    }
+    
+    var frontCameraFPS: Int {
+        get {
+            // Always return 30fps - the only supported frame rate
+            return 30
+        }
+        set {
+            // Accept but always store 30fps
+            defaults.set(30, forKey: keyFrontCameraFPS)
+        }
+    }
 
     // Helper to get the right zoom for current camera
     func currentZoomFactor(isFrontCamera: Bool) -> CGFloat {
@@ -71,6 +95,19 @@ class Settings {
             frontCameraZoom = zoom
         } else {
             backCameraZoom = zoom
+        }
+    }
+    
+    // Helper to get the right FPS for current camera
+    func currentFPS(isFrontCamera: Bool) -> Int {
+        return isFrontCamera ? frontCameraFPS : backCameraFPS
+    }
+    
+    func setFPS(_ fps: Int, isFrontCamera: Bool) {
+        if isFrontCamera {
+            frontCameraFPS = fps
+        } else {
+            backCameraFPS = fps
         }
     }
     

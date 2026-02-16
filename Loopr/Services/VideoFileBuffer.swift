@@ -21,7 +21,7 @@ class VideoFileBuffer {
     private var isPaused: Bool = false
     
     private let maxDurationSeconds: Int
-    private let fps: Int = 30
+    private let fps: Int  // Changed from hardcoded to parameter
     private let fileManager = FileManager.default
     private let writeQueue: DispatchQueue
     
@@ -36,21 +36,22 @@ class VideoFileBuffer {
     private let maxCacheSize: Int
     
     // MARK: - Initialization
-    init(maxDurationSeconds: Int, delaySeconds: Int, writeQueue: DispatchQueue) {
+    init(maxDurationSeconds: Int, delaySeconds: Int, fps: Int, writeQueue: DispatchQueue) {
         self.maxDurationSeconds = maxDurationSeconds
+        self.fps = fps
         self.writeQueue = writeQueue
         
         // PHASE 1 OPTIMIZED:
-        // - Keep full 30 seconds for SCRUBBING (when paused)
-        // - Delayed feed only needs delaySeconds (uses ring buffer separately if we add it back)
-        self.maxCacheSize = 60 * 30  // 900 frames for 30s scrubbing
+        // - Keep full 60 seconds for SCRUBBING (when paused)
+        // - Use actual FPS to calculate cache size
+        self.maxCacheSize = 60 * fps  // 60 seconds worth of frames at actual FPS
         
         let tempDir = fileManager.temporaryDirectory
         self.currentFileURL = tempDir.appendingPathComponent("buffer_main.mp4")
         self.alternateFileURL = tempDir.appendingPathComponent("buffer_alt.mp4")
         
         print("📁 Buffer files: \(currentFileURL!.path)")
-        print("💾 Cache size: \(maxCacheSize) frames (~\(maxDurationSeconds)s)")
+        print("💾 Cache size: \(maxCacheSize) frames (~60s at \(fps)fps)")
     }
     
     // MARK: - Writer Setup
@@ -192,7 +193,13 @@ class VideoFileBuffer {
                 cacheFrameForDisplay(sampleBuffer: sampleBuffer)
                 
                 if globalFrameCount % 300 == 0 {
-                    print("📹 Frames written: \(globalFrameCount) (~\(globalFrameCount/30)s) [elapsed: \(Int(elapsedTime))s, normalized: \(String(format: "%.1f", CMTimeGetSeconds(normalizedTime)))s]")
+                    let actualFPS = self.fps
+                    let expectedSeconds = globalFrameCount / actualFPS
+                    let actualSeconds = Int(elapsedTime)
+                    let measuredFPS = actualSeconds > 0 ? Float(globalFrameCount) / Float(actualSeconds) : 0
+                    
+                    print("📹 Frames written: \(globalFrameCount) (~\(expectedSeconds)s expected at \(actualFPS)fps)")
+                    print("   Actual elapsed: \(actualSeconds)s, Measured FPS: \(String(format: "%.1f", measuredFPS))fps")
                     
                     timestampLock.lock()
                     let timestampCount = frameTimestamps.count
@@ -500,4 +507,3 @@ class VideoFileBuffer {
         cleanup()
     }
 }
-

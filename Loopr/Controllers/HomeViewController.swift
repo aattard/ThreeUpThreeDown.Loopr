@@ -135,11 +135,11 @@ class HomeViewController: UIViewController {
         // Logo at top
         view.addSubview(logoImageView)
         
-        // Control buttons in stack view - NOW INCLUDING INFO BUTTON
+        // Control buttons in stack view
         controlsStackView.addArrangedSubview(flipButton)
         controlsStackView.addArrangedSubview(zoomButton)
         controlsStackView.addArrangedSubview(delayButton)
-        controlsStackView.addArrangedSubview(infoButton) // NEW
+        controlsStackView.addArrangedSubview(infoButton)
         view.addSubview(controlsStackView)
         
         // Start button
@@ -150,7 +150,7 @@ class HomeViewController: UIViewController {
         flipButton.addTarget(self, action: #selector(flipCameraTapped), for: .touchUpInside)
         zoomButton.addTarget(self, action: #selector(zoomButtonTapped), for: .touchUpInside)
         delayButton.addTarget(self, action: #selector(delayButtonTapped), for: .touchUpInside)
-        infoButton.addTarget(self, action: #selector(infoButtonTapped), for: .touchUpInside) // NEW
+        infoButton.addTarget(self, action: #selector(infoButtonTapped), for: .touchUpInside)
         
         NSLayoutConstraint.activate([
             // Logo - small at top center

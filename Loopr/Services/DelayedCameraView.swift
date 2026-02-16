@@ -283,7 +283,8 @@ class DelayedCameraView: UIView {
 
     private let leftTrimHandle: UIView = {
         let view = UIView()
-        view.backgroundColor = .systemYellow
+        //view.backgroundColor = .systemYellow
+        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.layer.cornerRadius = 3
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
@@ -307,7 +308,8 @@ class DelayedCameraView: UIView {
 
     private let rightTrimHandle: UIView = {
         let view = UIView()
-        view.backgroundColor = .systemYellow
+        //view.backgroundColor = .systemYellow
+        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.layer.cornerRadius = 3
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
@@ -331,7 +333,8 @@ class DelayedCameraView: UIView {
 
     private let topBorder: UIView = {
         let view = UIView()
-        view.backgroundColor = .systemYellow
+        //view.backgroundColor = .systemYellow
+        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
         return view
@@ -339,7 +342,8 @@ class DelayedCameraView: UIView {
 
     private let bottomBorder: UIView = {
         let view = UIView()
-        view.backgroundColor = .systemYellow
+        //view.backgroundColor = .systemYellow
+        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
         return view
@@ -969,17 +973,21 @@ class DelayedCameraView: UIView {
         frameMetadata.removeAll()
         metadataLock.unlock()
 
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
         let maxDuration = 60 + delaySeconds + 10  // 60s scrub + delay + 10s buffer
         
         videoFileBuffer = VideoFileBuffer(
             maxDurationSeconds: maxDuration,
             delaySeconds: delaySeconds,
+            fps: actualFPS,
             writeQueue: captureQueue
         )
         videoDataOutput?.setSampleBufferDelegate(self, queue: captureQueue)
 
+        // Always use 1080p at 30fps for best quality
         let videoWidth = 1920
         let videoHeight = 1080
+        
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: videoWidth,
@@ -987,8 +995,8 @@ class DelayedCameraView: UIView {
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: videoWidth * videoHeight * 11,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoExpectedSourceFrameRateKey: 30,
-                AVVideoMaxKeyFrameIntervalKey: 30
+                AVVideoExpectedSourceFrameRateKey: actualFPS,
+                AVVideoMaxKeyFrameIntervalKey: actualFPS
             ]
         ]
         try? videoFileBuffer?.startWriting(videoSettings: videoSettings, isInitialStart: true)
@@ -1016,7 +1024,8 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else {
             print("⚠️ Not enough frames: \(totalFrames) < \(requiredFrames)")
             return
@@ -1025,7 +1034,7 @@ class DelayedCameraView: UIView {
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size for scrub range
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -1065,7 +1074,7 @@ class DelayedCameraView: UIView {
         loopFrameIndex = scrubberPosition
         updateScrubberPlayheadPosition()
         
-        let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / 30.0
+        let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / Float(actualFPS)
         DispatchQueue.main.async {
             self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
         }
@@ -1106,13 +1115,14 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else { return }
         
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size, not hardcoded
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -1156,13 +1166,14 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
 
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else { return }
 
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size instead of hardcoded 30*30
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -1182,7 +1193,7 @@ class DelayedCameraView: UIView {
             loopFrameIndex = max(1, scrubberPosition)
         }
 
-        loopTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in
+        loopTimer = Timer.scheduledTimer(withTimeInterval: 1.0/Double(actualFPS), repeats: true) { [weak self] _ in
             guard let self = self, self.isLooping else { return }
 
             self.videoFileBuffer?.extractFrameFromFile(at: self.loopFrameIndex) { [weak self] image in
@@ -1198,7 +1209,7 @@ class DelayedCameraView: UIView {
                 self.scrubberPosition = self.loopFrameIndex
                 self.updateScrubberPlayheadPosition()
                 
-                let secondsFromStart = Float(self.loopFrameIndex - startFrame) / 30.0
+                let secondsFromStart = Float(self.loopFrameIndex - startFrame) / Float(actualFPS)
                 DispatchQueue.main.async {
                     self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
                 }
@@ -1271,14 +1282,6 @@ class DelayedCameraView: UIView {
         self.isFrontCamera = useFrontCamera
         self.isPaused = false
 
-        let maxDuration = 60 + delaySeconds + 10  // 60s scrub + delay + 10s buffer
-
-        videoFileBuffer = VideoFileBuffer(
-            maxDurationSeconds: maxDuration,
-            delaySeconds: delaySeconds,
-            writeQueue: captureQueue
-        )
-
         metadataLock.lock()
         frameMetadata.removeAll()
         metadataLock.unlock()
@@ -1295,7 +1298,9 @@ class DelayedCameraView: UIView {
             guard let self = self else { return }
 
             self.captureSession.beginConfiguration()
+            // Use .high preset for best quality at 30fps
             self.captureSession.sessionPreset = .high
+            print("📹 Using .high preset for 30fps")
 
             let position: AVCaptureDevice.Position = useFrontCamera ? .front : .back
             guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
@@ -1305,20 +1310,50 @@ class DelayedCameraView: UIView {
             }
 
             self.currentDevice = camera
+            
+            // Get the FPS setting (always 30fps now)
+            let actualTargetFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
+            print("📹 Target FPS from settings: \(actualTargetFPS)")
 
             do {
                 try camera.lockForConfiguration()
 
+                // Try to set the target FPS
+                var fpsSet = false
+                let targetFrameRate = Double(actualTargetFPS)
+                
                 for range in camera.activeFormat.videoSupportedFrameRateRanges {
-                    if 30.0 >= range.minFrameRate && 30.0 <= range.maxFrameRate {
-                        camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-                        camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
-                        print("✅ Set to 30fps")
+                    if targetFrameRate >= range.minFrameRate && targetFrameRate <= range.maxFrameRate {
+                        camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(actualTargetFPS))
+                        camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(actualTargetFPS))
+                        print("✅ Set to \(actualTargetFPS)fps")
+                        fpsSet = true
                         break
                     }
                 }
+                
+                if !fpsSet {
+                    print("⚠️ \(actualTargetFPS)fps not supported, falling back to 30fps")
+                    camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+                    camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+                    // Update settings with actual FPS
+                    Settings.shared.setFPS(30, isFrontCamera: useFrontCamera)
+                    print("📹 Settings updated to 30fps for \(useFrontCamera ? "front" : "back") camera")
+                }
 
                 camera.unlockForConfiguration()
+                
+                // NOW create VideoFileBuffer with the ACTUAL FPS that will be used
+                let actualFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
+                let maxDuration = 60 + delaySeconds + 10
+                
+                videoFileBuffer = VideoFileBuffer(
+                    maxDurationSeconds: maxDuration,
+                    delaySeconds: delaySeconds,
+                    fps: actualFPS,
+                    writeQueue: captureQueue
+                )
+                print("📹 VideoFileBuffer created with \(actualFPS)fps")
 
                 let input = try AVCaptureDeviceInput(device: camera)
                 if self.captureSession.canAddInput(input) {
@@ -1332,6 +1367,7 @@ class DelayedCameraView: UIView {
 
                 let output = AVCaptureVideoDataOutput()
                 output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+                // Keep all frames for smooth delayed playback at 30fps
                 output.alwaysDiscardsLateVideoFrames = false
                 output.setSampleBufferDelegate(self, queue: self.captureQueue)
 
@@ -1360,19 +1396,26 @@ class DelayedCameraView: UIView {
                 camera.unlockForConfiguration()
                 print("🔍 Applied zoom: \(clampedZoom)x")
 
+                // Always use 1080p at 30fps for best quality
                 let videoWidth = 1920
                 let videoHeight = 1080
+                
                 let videoSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.h264,
                     AVVideoWidthKey: videoWidth,
                     AVVideoHeightKey: videoHeight,
                     AVVideoCompressionPropertiesKey: [
+                        // Optimized bitrate for 1080p@30fps
                         AVVideoAverageBitRateKey: videoWidth * videoHeight * 11,
                         AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                        AVVideoExpectedSourceFrameRateKey: 30,
-                        AVVideoMaxKeyFrameIntervalKey: 30
+                        AVVideoExpectedSourceFrameRateKey: actualFPS,
+                        AVVideoMaxKeyFrameIntervalKey: actualFPS
                     ]
                 ]
+                
+                print("📹 Video settings: 1080p @ \(actualFPS)fps")
+                
+                print("📹 Video settings configured for \(actualFPS)fps")
 
                 try self.videoFileBuffer?.startWriting(videoSettings: videoSettings, isInitialStart: true)
 
@@ -1492,12 +1535,13 @@ class DelayedCameraView: UIView {
             self.countdownStopButton.alpha = 0
         }
 
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { [weak self] _ in
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0/Double(actualFPS), repeats: true) { [weak self] _ in
             self?.updateDisplay()
         }
 
         RunLoop.main.add(displayTimer!, forMode: .common)
-        print("✅ Display timer started")
+        print("✅ Display timer started at \(actualFPS)fps")
     }
 
     private func updateDisplay() {
@@ -1507,8 +1551,17 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
 
-        let requiredFrames = delaySeconds * 30
-        guard totalFrames >= requiredFrames, requiredFrames > 0 else { return }
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
+        
+        if totalFrames < requiredFrames {
+            if totalFrames % actualFPS == 0 {  // Log every second
+                print("⏳ Waiting for buffer: \(totalFrames)/\(requiredFrames) frames (\(Float(totalFrames)/Float(actualFPS))s/\(delaySeconds)s)")
+            }
+            return
+        }
+        
+        guard requiredFrames > 0 else { return }
 
         let index = totalFrames - requiredFrames
         guard index >= 0 && index < totalFrames else { return }
@@ -1517,6 +1570,8 @@ class DelayedCameraView: UIView {
 
         if let image = videoFileBuffer?.getRecentFrame(at: index) {
             displayFrame(image)
+        } else {
+            print("⚠️ Failed to get frame \(index) from cache (totalFrames: \(totalFrames))")
         }
 
         DispatchQueue.main.async {
@@ -1589,7 +1644,8 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else {
             print("⚠️ Not enough frames to pause")
             return
@@ -1600,7 +1656,7 @@ class DelayedCameraView: UIView {
         loopFrameIndex = pausePointIndex
         
         // PHASE 1: Use actual cache size for scrub range
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -1608,7 +1664,19 @@ class DelayedCameraView: UIView {
         let oldestInCache = max(1, totalFrames - cacheSize)
         let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
         
-        //print("📍 Paused at frame \(pausePointIndex) (oldest: \(oldestAllowedIndex), cache: \(cacheFrameCount) frames, ~\(cacheFrameCount/30)s)")
+        print("📊 Pause Debug:")
+        print("   FPS: \(actualFPS)")
+        print("   Delay: \(delaySeconds)s = \(requiredFrames) frames")
+        print("   Total frames captured: \(totalFrames)")
+        print("   Pause point: \(pausePointIndex)")
+        print("   Scrub back: 60s = \(scrubBackFrames) frames")
+        print("   Desired oldest: \(desiredOldestIndex)")
+        print("   Cache size: \(cacheSize) frames (~\(Float(cacheSize)/Float(actualFPS))s)")
+        print("   Oldest in cache: \(oldestInCache)")
+        print("   Oldest allowed: \(oldestAllowedIndex)")
+        print("   Available range: \(oldestAllowedIndex) to \(pausePointIndex)")
+        print("   Available frames: \(pausePointIndex - oldestAllowedIndex) (~\(Float(pausePointIndex - oldestAllowedIndex)/Float(actualFPS))s)")
+        print("   LIMITED BY: \(oldestAllowedIndex == oldestInCache ? "CACHE SIZE" : "DESIRED RANGE")")
         
         videoFileBuffer?.pauseRecording { [weak self] fileURL in
             guard let self = self else { return }
@@ -1623,7 +1691,7 @@ class DelayedCameraView: UIView {
                 self.showControls()
                 self.updateScrubberPlayheadPosition()
                 
-                let secondsFromStart = Float(self.scrubberPosition - oldestAllowedIndex) / 30.0
+                let secondsFromStart = Float(self.scrubberPosition - oldestAllowedIndex) / Float(actualFPS)
                 self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
             }
         }
@@ -1684,7 +1752,8 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
 
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else {
             print("⚠️ Not enough frames to enter clip mode")
             return
@@ -1693,7 +1762,7 @@ class DelayedCameraView: UIView {
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size instead of hardcoded 30*30
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -1707,7 +1776,7 @@ class DelayedCameraView: UIView {
             return
         }
 
-        print("✂️ Clip range: \(oldestAllowedIndex) to \(pausePointIndex) (\(scrubBackFrames) frames, ~\(scrubBackFrames/30)s)")
+        print("✂️ Clip range: \(oldestAllowedIndex) to \(pausePointIndex) (\(scrubBackFrames) frames, ~\(Float(scrubBackFrames)/Float(actualFPS))s)")
 
         // NEW: Default to FULL RANGE (start to end)
         clipStartIndex = oldestAllowedIndex
@@ -1808,10 +1877,11 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         if totalFrames >= requiredFrames {
             let pausePointIndex = totalFrames - requiredFrames  // ADD THIS LINE
-            let scrubBackFrames = scrubDurationSeconds * 30
+            let scrubBackFrames = scrubDurationSeconds * actualFPS
             let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
             // Can't go older than what's in cache
@@ -1819,7 +1889,7 @@ class DelayedCameraView: UIView {
             let oldestInCache = max(1, totalFrames - cacheSize)
             let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
             
-            let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / 30.0
+            let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / Float(actualFPS)
             DispatchQueue.main.async {
                 self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
             }
@@ -1839,11 +1909,12 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size for the range
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -1880,13 +1951,14 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else { return }
         
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -1944,9 +2016,10 @@ class DelayedCameraView: UIView {
         // FIX: Only update time label for clip mode
         guard isClipMode else { return }
         
-        let timeInClip = Float(clipPlayheadPosition - clipStartIndex) / 30.0
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let timeInClip = Float(clipPlayheadPosition - clipStartIndex) / Float(actualFPS)
         DispatchQueue.main.async {
-            self.timeLabel.text = String(format: "%.1fs", timeInClip)
+            self.timeLabel.text = String(format: "%05.2f", timeInClip)
         }
     }
 
@@ -1989,12 +2062,13 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else { return }
         
         let pausePointIndex = totalFrames - requiredFrames
         
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -2011,7 +2085,7 @@ class DelayedCameraView: UIView {
         let newStartFrame = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
         
         let minStartFrame = oldestAllowedIndex
-        let maxStartFrame = clipEndIndex - 30
+        let maxStartFrame = clipEndIndex - actualFPS
         
         clipStartIndex = max(minStartFrame, min(newStartFrame, maxStartFrame))
         clipPlayheadPosition = clipStartIndex
@@ -2076,12 +2150,13 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else { return }
         
         let pausePointIndex = totalFrames - requiredFrames
         
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -2159,13 +2234,14 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else { return }
         
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -2225,13 +2301,14 @@ class DelayedCameraView: UIView {
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
         
-        let requiredFrames = delaySeconds * 30
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let requiredFrames = delaySeconds * actualFPS
         guard totalFrames >= requiredFrames else { return }
         
         let pausePointIndex = totalFrames - requiredFrames
         
         // PHASE 1: Use actual cache size
-        let scrubBackFrames = scrubDurationSeconds * 30
+        let scrubBackFrames = scrubDurationSeconds * actualFPS
         let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
         // Can't go older than what's in cache
@@ -2319,6 +2396,10 @@ class DelayedCameraView: UIView {
         let rotationAngle = previewLayer?.connection?.videoRotationAngle ?? 0
         print("🔄 Creating clip with rotation angle: \(rotationAngle), isFrontCamera: \(isFrontCamera)")
         
+        // Get the actual FPS being used
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        print("📹 Creating clip at \(actualFPS) fps")
+        
         // Determine video dimensions based on rotation
         let isRotated = rotationAngle == 90 || rotationAngle == 270
         let videoWidth = isRotated ? 1080 : 1920
@@ -2331,8 +2412,8 @@ class DelayedCameraView: UIView {
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: videoWidth * videoHeight * 11,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoExpectedSourceFrameRateKey: 30,
-                AVVideoMaxKeyFrameIntervalKey: 30
+                AVVideoExpectedSourceFrameRateKey: actualFPS,
+                AVVideoMaxKeyFrameIntervalKey: actualFPS
             ]
         ]
 
@@ -2361,7 +2442,7 @@ class DelayedCameraView: UIView {
         writer.startSession(atSourceTime: .zero)
 
         let clipFrameCount = clipEndIndex - clipStartIndex
-        print("📹 Creating clip: \(clipFrameCount) frames (\(Float(clipFrameCount)/30.0)s)")
+        print("📹 Creating clip: \(clipFrameCount) frames (\(Float(clipFrameCount)/Float(actualFPS))s)")
 
         var frameIndex = 0
         let queue = DispatchQueue(label: "com.loopr.clipExport")
@@ -2375,7 +2456,7 @@ class DelayedCameraView: UIView {
 
             while writerInput.isReadyForMoreMediaData && frameIndex < clipFrameCount {
                 let currentFrameIndex = self.clipStartIndex + frameIndex
-                let presentationTime = CMTime(value: Int64(frameIndex), timescale: 30)
+                let presentationTime = CMTime(value: Int64(frameIndex), timescale: CMTimeScale(actualFPS))
 
                 let semaphore = DispatchSemaphore(value: 0)
                 var pixelBuffer: CVPixelBuffer?
@@ -2397,7 +2478,7 @@ class DelayedCameraView: UIView {
                     adaptor.append(buffer, withPresentationTime: presentationTime)
                     frameIndex += 1
 
-                    if frameIndex % 30 == 0 {
+                    if frameIndex % actualFPS == 0 {
                         print("📹 Progress: \(frameIndex)/\(clipFrameCount) frames")
                     }
                 } else {
@@ -2555,8 +2636,11 @@ extension DelayedCameraView: AVCaptureVideoDataOutputSampleBufferDelegate {
 
             if count == 1 {
                 print("🎬 First frame captured to file!")
-            } else if count % 300 == 0 {
-                print("📹 Metadata: \(count) frames (~\(count/30)s)")
+            } else {
+                let actualFPS = Settings.shared.currentFPS(isFrontCamera: self.isFrontCamera)
+                if count % (actualFPS * 10) == 0 {  // Log every 10 seconds
+                    print("📹 Metadata: \(count) frames (~\(count/actualFPS)s)")
+                }
             }
         }
     }

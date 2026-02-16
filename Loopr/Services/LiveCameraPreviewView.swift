@@ -146,6 +146,11 @@ class LiveCameraPreviewView: UIView {
             
             self.currentDevice = camera
             
+            // Configure frame rate (always 30fps)
+            let desiredFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
+            let actualFPS = self.configureFPS(device: camera, targetFPS: desiredFPS)
+            print("📹 Configured FPS: \(actualFPS)")
+            
             do {
                 let input = try AVCaptureDeviceInput(device: camera)
                 if session.canAddInput(input) {
@@ -337,6 +342,93 @@ class LiveCameraPreviewView: UIView {
             print("❌ Failed to set zoom: \(error)")
         }
     }
+    
+    // MARK: - FPS Support Methods
+    
+    /// Check if a device supports a specific frame rate
+    func checkFPSSupport(device: AVCaptureDevice, fps: Int) -> Bool {
+        let targetFrameRate = Double(fps)
+        
+        for format in device.formats {
+            for range in format.videoSupportedFrameRateRanges {
+                if range.minFrameRate <= targetFrameRate && targetFrameRate <= range.maxFrameRate {
+                    return true
+                }
+            }
+        }
+        
+        return false
+    }
+    
+    /// Configure the device to use the specified FPS, returns actual FPS set
+    @discardableResult
+    func configureFPS(device: AVCaptureDevice, targetFPS: Int) -> Int {
+        guard checkFPSSupport(device: device, fps: targetFPS) else {
+            print("⚠️ \(targetFPS) fps not supported, falling back to 30fps")
+            return configureFPS(device: device, targetFPS: 30)
+        }
+        
+        let targetFrameRate = Double(targetFPS)
+        var bestFormat: AVCaptureDevice.Format?
+        var bestRange: AVFrameRateRange?
+        
+        // Find the best format that supports the target frame rate
+        for format in device.formats {
+            for range in format.videoSupportedFrameRateRanges {
+                if range.minFrameRate <= targetFrameRate && targetFrameRate <= range.maxFrameRate {
+                    // Prefer formats with higher max resolution
+                    let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                    if bestFormat == nil {
+                        bestFormat = format
+                        bestRange = range
+                    } else if let currentBest = bestFormat {
+                        let currentDimensions = CMVideoFormatDescriptionGetDimensions(currentBest.formatDescription)
+                        if dimensions.width * dimensions.height > currentDimensions.width * currentDimensions.height {
+                            bestFormat = format
+                            bestRange = range
+                        }
+                    }
+                }
+            }
+        }
+        
+        guard let format = bestFormat, let range = bestRange else {
+            print("❌ No suitable format found for \(targetFPS)fps")
+            return 30
+        }
+        
+        do {
+            try device.lockForConfiguration()
+            
+            device.activeFormat = format
+            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFPS))
+            device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(targetFPS))
+            
+            device.unlockForConfiguration()
+            
+            print("✅ Successfully configured \(targetFPS)fps")
+            return targetFPS
+            
+        } catch {
+            print("❌ Failed to configure FPS: \(error)")
+            return 30
+        }
+    }
+    
+    /// Apply new FPS setting to current device
+    func applyFPS(_ fps: Int) {
+        guard let device = currentDevice else { return }
+        
+        let actualFPS = configureFPS(device: device, targetFPS: fps)
+        
+        // Save the setting
+        if isFrontCamera {
+            Settings.shared.frontCameraFPS = actualFPS
+        } else {
+            Settings.shared.backCameraFPS = actualFPS
+        }
+        
+        print("📹 FPS set to: \(actualFPS)")
+    }
 
 }
-
