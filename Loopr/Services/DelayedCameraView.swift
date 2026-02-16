@@ -283,8 +283,8 @@ class DelayedCameraView: UIView {
 
     private let leftTrimHandle: UIView = {
         let view = UIView()
-        //view.backgroundColor = .systemYellow
-        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
+        view.backgroundColor = .systemYellow
+        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.layer.cornerRadius = 3
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
@@ -308,8 +308,8 @@ class DelayedCameraView: UIView {
 
     private let rightTrimHandle: UIView = {
         let view = UIView()
-        //view.backgroundColor = .systemYellow
-        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
+        view.backgroundColor = .systemYellow
+        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.layer.cornerRadius = 3
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
@@ -333,8 +333,8 @@ class DelayedCameraView: UIView {
 
     private let topBorder: UIView = {
         let view = UIView()
-        //view.backgroundColor = .systemYellow
-        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
+        view.backgroundColor = .systemYellow
+        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
         return view
@@ -342,8 +342,8 @@ class DelayedCameraView: UIView {
 
     private let bottomBorder: UIView = {
         let view = UIView()
-        //view.backgroundColor = .systemYellow
-        view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
+        view.backgroundColor = .systemYellow
+        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
         return view
