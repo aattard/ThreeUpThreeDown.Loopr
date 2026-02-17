@@ -32,21 +32,32 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
     
     private func prewarmApp() {
-        // Request camera permissions early
-        AVCaptureDevice.requestAccess(for: .video) { granted in
-            print(granted ? "✅ Camera access granted" : "❌ Camera access denied")
-            
-            if granted {
-                // Create and prepare HomeViewController in background
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+
+        if status == .notDetermined {
+            // First launch — request permission
+            AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
-                    self.setupHomeViewController()
+                    if granted {
+                        print("✅ Camera access granted")
+                        self.setupHomeViewController()
+                    } else {
+                        print("❌ Camera access denied")
+                        // Still set up HomeVC so splash can transition
+                        // HomeVC will show the alert once it appears
+                        self.setupHomeViewController()
+                    }
                 }
             }
+        } else {
+            // Permission already determined (granted or denied) — set up immediately
+            DispatchQueue.main.async {
+                self.setupHomeViewController()
+            }
         }
-        
-        // Preload any heavy resources here
+
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = Settings.shared // Initialize settings singleton
+            _ = Settings.shared
             DispatchQueue.main.async {
                 print("✅ App pre-warming complete")
             }

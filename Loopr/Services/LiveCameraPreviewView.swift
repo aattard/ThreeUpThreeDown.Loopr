@@ -9,7 +9,11 @@ class LiveCameraPreviewView: UIView {
     private var currentDevice: AVCaptureDevice?
     private var lastZoomFactor: CGFloat = 1.0
     
+    // Frame rate support tracking
+    private var supports60FPS: Bool = false
+    
     var onZoomChanged: ((CGFloat) -> Void)?
+    var onFPSSupportChanged: ((Bool) -> Void)?  // Callback when FPS support changes
     
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -141,12 +145,24 @@ class LiveCameraPreviewView: UIView {
             guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
                 print("❌ No camera found for preview")
                 session.commitConfiguration()
+                DispatchQueue.main.async {
+                    completion?()
+                }
                 return
             }
             
             self.currentDevice = camera
             
-            // Configure frame rate (always 30fps)
+            // Check for 60fps support
+            self.supports60FPS = self.checkFPSSupport(device: camera, fps: 60)
+            print("📹 Camera supports 60fps: \(self.supports60FPS)")
+            
+            // Notify about FPS support change
+            DispatchQueue.main.async {
+                self.onFPSSupportChanged?(self.supports60FPS)
+            }
+            
+            // Configure frame rate
             let desiredFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
             let actualFPS = self.configureFPS(device: camera, targetFPS: desiredFPS)
             print("📹 Configured FPS: \(actualFPS)")
@@ -204,6 +220,10 @@ class LiveCameraPreviewView: UIView {
             } catch {
                 print("❌ Preview setup error: \(error)")
                 session.commitConfiguration()
+                // Call completion even on failure so splash screen doesn't hang
+                DispatchQueue.main.async {
+                    completion?()
+                }
             }
         }
     }
@@ -413,6 +433,11 @@ class LiveCameraPreviewView: UIView {
             print("❌ Failed to configure FPS: \(error)")
             return 30
         }
+    }
+    
+    /// Get current FPS support status
+    func getCurrentFPSSupport() -> Bool {
+        return supports60FPS
     }
     
     /// Apply new FPS setting to current device

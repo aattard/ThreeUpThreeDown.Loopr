@@ -226,27 +226,45 @@ class SessionViewController: UIViewController {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         
         if status == .authorized {
-            // Already authorized, start immediately
             startCameraSession()
         } else if status == .notDetermined {
-            // Request permission
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
                     if granted {
-                        // Small delay to ensure system is ready
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             self?.startCameraSession()
                         }
                     } else {
-                        print("❌ Camera permission denied")
+                        self?.showCameraPermissionAlert()
                     }
                 }
             }
         } else {
-            print("❌ Camera permission previously denied")
+            // Previously denied
+            showCameraPermissionAlert()
         }
     }
 
+    private func showCameraPermissionAlert() {
+        let alert = UIAlertController(
+            title: "Camera Access Required",
+            message: "Loopr needs camera access to record your swing. Tap Open Settings, then enable Camera for Loopr.",
+            preferredStyle: .alert
+        )
+        
+        alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+        })
+        
+        alert.addAction(UIAlertAction(title: "Not Now", style: .cancel) { [weak self] _ in
+            // Dismiss the session screen since we can't do anything without camera
+            self?.dismiss(animated: true)
+        })
+        
+        present(alert, animated: true)
+    }
     
     private func startCameraSession() {
         let settings = Settings.shared
