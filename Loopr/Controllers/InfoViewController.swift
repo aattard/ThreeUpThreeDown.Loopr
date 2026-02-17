@@ -1,12 +1,13 @@
 import UIKit
 
-class InfoModalViewController: UIViewController {
+class InfoViewController: UIViewController {
     
     private let containerView: UIView = {
         let view = UIView()
         view.backgroundColor = .black
-        view.layer.cornerRadius = 20
-        view.layer.masksToBounds = true
+        // Remove rounded corners for full screen
+        // view.layer.cornerRadius = 20
+        // view.layer.masksToBounds = true
         view.translatesAutoresizingMaskIntoConstraints = false
         return view
     }()
@@ -121,8 +122,8 @@ class InfoModalViewController: UIViewController {
         let button = UIButton(type: .system)
         button.setTitle("✕", for: .normal)
         button.titleLabel?.font = UIFont.systemFont(ofSize: 28, weight: .regular)
-        button.setTitleColor(.black, for: .normal)
-        button.backgroundColor = UIColor.systemGray5
+        button.setTitleColor(.white, for: .normal)  // Changed from .black to .white
+        button.backgroundColor = UIColor.systemGray.withAlphaComponent(0.3)  // Changed from systemGray5
         button.layer.cornerRadius = 22
         button.translatesAutoresizingMaskIntoConstraints = false
         return button
@@ -130,18 +131,17 @@ class InfoModalViewController: UIViewController {
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        print("ℹ️ InfoViewController loaded")
         
-        print("ℹ️ InfoModalViewController loaded")
-        
-        // Semi-transparent background
-        view.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        // Solid black background (not semi-transparent)
+        view.backgroundColor = .black  // Changed from UIColor.black.withAlphaComponent(0.6)
         
         setupUI()
         setupActions()
         
-        // Tap outside to dismiss
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(backgroundTapped(_:)))
-        view.addGestureRecognizer(tapGesture)
+        // REMOVE the tap gesture recognizer (no longer needed)
+        // let tapGesture = UITapGestureRecognizer(target: self, action: #selector(backgroundTapped(_:)))
+        // view.addGestureRecognizer(tapGesture)
         
         // Debug: Check if logo loaded
         if logoImageView.image == nil {
@@ -152,7 +152,7 @@ class InfoModalViewController: UIViewController {
     }
     
     private func setupUI() {
-        // Add main container to view
+        // Add main container to view (now fills entire screen)
         view.addSubview(containerView)
         
         // Add close button and scroll view to container
@@ -166,24 +166,22 @@ class InfoModalViewController: UIViewController {
         contentView.addSubview(logoImageView)
         contentView.addSubview(titleLabel)
         contentView.addSubview(instructionsLabel)
-        // contentView.addSubview(dividerView)  // REMOVED
         contentView.addSubview(supportLabel)
-        // contentView.addSubview(supportDescLabel)  // REMOVED
         contentView.addSubview(emailButton)
         contentView.addSubview(companyLogoImageView)
         contentView.addSubview(versionLabel)
         
         // Layout constraints
         NSLayoutConstraint.activate([
-            // Container view - centered, fixed constraints
-            containerView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            containerView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            containerView.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.85),
-            containerView.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.75),
+            // Container view - NOW FILLS ENTIRE SCREEN
+            containerView.topAnchor.constraint(equalTo: view.topAnchor),
+            containerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            containerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            containerView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             
-            // Close button - top right corner
-            closeButton.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 12),
-            closeButton.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -12),
+            // Close button - top right corner with safe area
+            closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             closeButton.widthAnchor.constraint(equalToConstant: 44),
             closeButton.heightAnchor.constraint(equalToConstant: 44),
             
@@ -193,45 +191,38 @@ class InfoModalViewController: UIViewController {
             scrollView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
             
-            // Content view inside scroll view - CRITICAL for scroll view to work
+            // Rest of constraints remain the same...
             contentView.topAnchor.constraint(equalTo: scrollView.topAnchor),
             contentView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
             contentView.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
             contentView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
             
-            // Logo at top
             logoImageView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 0),
             logoImageView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             logoImageView.widthAnchor.constraint(equalToConstant: 200),
             logoImageView.heightAnchor.constraint(equalToConstant: 200),
             
-            // Title below logo
             titleLabel.topAnchor.constraint(equalTo: logoImageView.bottomAnchor, constant: 20),
             titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             
-            // Instructions below title
             instructionsLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 20),
             instructionsLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 25),
             instructionsLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -25),
             
-            // Support label below instructions (no divider anymore)
             supportLabel.topAnchor.constraint(equalTo: instructionsLabel.bottomAnchor, constant: 40),
             supportLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             supportLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
             
-            // Email button below support label (no support description)
             emailButton.topAnchor.constraint(equalTo: supportLabel.bottomAnchor, constant: 10),
             emailButton.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             
-            // Company logo below email button
             companyLogoImageView.topAnchor.constraint(equalTo: emailButton.bottomAnchor, constant: 40),
             companyLogoImageView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             companyLogoImageView.widthAnchor.constraint(equalToConstant: 160),
             companyLogoImageView.heightAnchor.constraint(equalToConstant: 60),
             
-            // Version below company logo - MORE SPACE
             versionLabel.topAnchor.constraint(equalTo: companyLogoImageView.bottomAnchor, constant: 60),
             versionLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             versionLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
@@ -264,14 +255,6 @@ class InfoModalViewController: UIViewController {
                 showCopiedAlert()
                 print("📋 Email copied to clipboard")
             }
-        }
-    }
-    
-    @objc private func backgroundTapped(_ gesture: UITapGestureRecognizer) {
-        let location = gesture.location(in: view)
-        if !containerView.frame.contains(location) {
-            print("ℹ️ Background tapped, dismissing")
-            dismiss(animated: true)
         }
     }
     

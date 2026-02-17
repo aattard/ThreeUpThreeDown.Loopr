@@ -1,7 +1,7 @@
 import UIKit
 import AVFoundation
 
-class HomeViewController: UIViewController {
+class HomeViewController: UIViewController, UIViewControllerTransitioningDelegate {
     
     private var cameraPreviewView: LiveCameraPreviewView!
     private var delayedCameraView: DelayedCameraView?
@@ -82,15 +82,15 @@ class HomeViewController: UIViewController {
         return button
     }()
     
-    // NEW: Info button
+    // Info button - positioned in top right (like close button toggle)
     private let infoButton: UIButton = {
         let button = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
+        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)  // Slightly larger icon
         let image = UIImage(systemName: "info.circle", withConfiguration: config)
         button.setImage(image, for: .normal)
         button.tintColor = .white
-        button.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        button.layer.cornerRadius = 25
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.6)  // Matches other button style
+        button.layer.cornerRadius = 22  // Matches close button (44/2 = 22)
         button.translatesAutoresizingMaskIntoConstraints = false
         return button
     }()
@@ -139,8 +139,11 @@ class HomeViewController: UIViewController {
         controlsStackView.addArrangedSubview(flipButton)
         controlsStackView.addArrangedSubview(zoomButton)
         controlsStackView.addArrangedSubview(delayButton)
-        controlsStackView.addArrangedSubview(infoButton)
+        //controlsStackView.addArrangedSubview(infoButton) // REMOVED - standalone button now
         view.addSubview(controlsStackView)
+        
+        // Info button - standalone in top right (like close button on InfoView)
+        view.addSubview(infoButton)
         
         // Start button
         view.addSubview(startButton)
@@ -169,19 +172,19 @@ class HomeViewController: UIViewController {
             controlsStackView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             controlsStackView.bottomAnchor.constraint(equalTo: startButton.topAnchor, constant: -30),
             
-            // Individual button sizes
+            // Individual button sizes (in stack)
             flipButton.widthAnchor.constraint(equalToConstant: 50),
             flipButton.heightAnchor.constraint(equalToConstant: 50),
-            
             zoomButton.widthAnchor.constraint(equalToConstant: 50),
             zoomButton.heightAnchor.constraint(equalToConstant: 50),
-            
             delayButton.widthAnchor.constraint(equalToConstant: 50),
             delayButton.heightAnchor.constraint(equalToConstant: 50),
             
-            // NEW: Info button size
-            infoButton.widthAnchor.constraint(equalToConstant: 50),
-            infoButton.heightAnchor.constraint(equalToConstant: 50)
+            // Info button - TOP RIGHT (matches close button position on InfoView)
+            infoButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            infoButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            infoButton.widthAnchor.constraint(equalToConstant: 44),
+            infoButton.heightAnchor.constraint(equalToConstant: 44)
         ])
         
         // Update button states
@@ -228,6 +231,7 @@ class HomeViewController: UIViewController {
             self.logoImageView.alpha = 0
             self.controlsStackView.alpha = 0
             self.startButton.alpha = 0
+            self.infoButton.alpha = 0
         }
     }
     
@@ -250,6 +254,7 @@ class HomeViewController: UIViewController {
             self.logoImageView.alpha = 1
             self.controlsStackView.alpha = 1
             self.startButton.alpha = 1
+            self.infoButton.alpha = 1
         }
     }
     
@@ -331,14 +336,21 @@ class HomeViewController: UIViewController {
         present(alert, animated: true)
     }
     
-    // NEW: Info button action
     @objc private func infoButtonTapped() {
         print("ℹ️ Info button tapped")
-        
-        let infoVC = InfoModalViewController()
-        infoVC.modalPresentationStyle = .overFullScreen
-        infoVC.modalTransitionStyle = .crossDissolve
+        let infoVC = InfoViewController()  // or InfoModalViewController
+        infoVC.modalPresentationStyle = .fullScreen
+        infoVC.transitioningDelegate = self  // Set the delegate
         present(infoVC, animated: true)
+    }
+    
+    // MARK: - UIViewControllerTransitioningDelegate
+    func animationController(forPresented presented: UIViewController, presenting: UIViewController, source: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        return HorizontalSlideTransition(isPresenting: true)
+    }
+    
+    func animationController(forDismissed dismissed: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        return HorizontalSlideTransition(isPresenting: false)
     }
     
     private func updateDelayButton() {
@@ -351,3 +363,49 @@ class HomeViewController: UIViewController {
         zoomButton.setTitle(String(format: "%.1fx", currentZoom), for: .normal)
     }
 }
+
+// Custom horizontal slide transition
+class HorizontalSlideTransition: NSObject, UIViewControllerAnimatedTransitioning {
+    let isPresenting: Bool
+    
+    init(isPresenting: Bool) {
+        self.isPresenting = isPresenting
+        super.init()
+    }
+    
+    func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval {
+        return 0.5
+    }
+    
+    func animateTransition(using transitionContext: UIViewControllerContextTransitioning) {
+        guard let fromView = transitionContext.view(forKey: .from),
+              let toView = transitionContext.view(forKey: .to) else {
+            return
+        }
+        
+        let container = transitionContext.containerView
+        let screenWidth = container.bounds.width
+        
+        if isPresenting {
+            // Slide in from right to left
+            container.addSubview(toView)
+            toView.frame = container.bounds.offsetBy(dx: screenWidth, dy: 0)
+            
+            UIView.animate(withDuration: transitionDuration(using: transitionContext), animations: {
+                toView.frame = container.bounds
+            }, completion: { finished in
+                transitionContext.completeTransition(finished)
+            })
+        } else {
+            // Slide out from left to right
+            container.insertSubview(toView, belowSubview: fromView)
+            
+            UIView.animate(withDuration: transitionDuration(using: transitionContext), animations: {
+                fromView.frame = container.bounds.offsetBy(dx: screenWidth, dy: 0)
+            }, completion: { finished in
+                transitionContext.completeTransition(finished)
+            })
+        }
+    }
+}
+
