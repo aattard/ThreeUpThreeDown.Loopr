@@ -28,6 +28,11 @@ class DelayedCameraView: UIView {
 
     private var displayTimer: Timer?
     private var displayImageView: UIImageView!
+    
+    private var activityCheckTimer: Timer?
+    private var activityCountdownTimer: Timer?
+    private var activityTimeRemaining: Int = 60
+    private let activityCheckInterval: TimeInterval = 2700 // Change to 1800 for 30 minutes, 2700 for 45
 
     // Scrubbing properties
     private var scrubberPosition: Int = 0
@@ -163,6 +168,90 @@ class DelayedCameraView: UIView {
             durationLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
             durationLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         ])
+        
+        return container
+    }()
+    
+    private lazy var activityAlertContainer: UIView = {
+        let container = UIView()
+        container.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        container.layer.cornerRadius = 20
+        container.clipsToBounds = true
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.alpha = 0
+        
+        // Message label
+        let messageLabel = UILabel()
+        messageLabel.text = "Are you still there?"
+        messageLabel.font = UIFont.systemFont(ofSize: 32, weight: .semibold)
+        messageLabel.textColor = .white
+        messageLabel.textAlignment = .center
+        messageLabel.numberOfLines = 0
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+        
+        // Yes button with progress background
+        let yesButton = UIButton(type: .system)
+        yesButton.setTitle("Yes, Continue", for: .normal)
+        yesButton.titleLabel?.font = UIFont.systemFont(ofSize: 20, weight: .bold)
+        yesButton.setTitleColor(.white, for: .normal)
+        yesButton.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
+        yesButton.layer.cornerRadius = 12
+        yesButton.layer.borderWidth = 1  // ADD THIS
+        yesButton.layer.borderColor = UIColor.black.withAlphaComponent(1.0).cgColor  // ADD THIS
+        yesButton.clipsToBounds = true
+        yesButton.translatesAutoresizingMaskIntoConstraints = false
+        yesButton.tag = 1001
+        
+        // Progress overlay - darker overlay that expands left to right
+        let progressOverlay = UIView()
+        progressOverlay.backgroundColor = UIColor.black.withAlphaComponent(0.4)
+        progressOverlay.translatesAutoresizingMaskIntoConstraints = false
+        progressOverlay.tag = 1002
+        yesButton.insertSubview(progressOverlay, at: 0)
+        
+        // No button (smaller text link)
+        let noButton = UIButton(type: .system)
+        noButton.setTitle("No, Pause", for: .normal)
+        noButton.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .regular)
+        noButton.setTitleColor(.white.withAlphaComponent(0.7), for: .normal)
+        noButton.translatesAutoresizingMaskIntoConstraints = false
+        noButton.tag = 1003
+        
+        container.addSubview(messageLabel)
+        container.addSubview(yesButton)
+        container.addSubview(noButton)
+        
+        NSLayoutConstraint.activate([
+            // Message at top
+            messageLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 40),
+            messageLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 30),
+            messageLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -30),
+            
+            // Yes button below message
+            yesButton.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 40),
+            yesButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 30),
+            yesButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -30),
+            yesButton.heightAnchor.constraint(equalToConstant: 56),
+            
+            // Progress overlay - only set position, NOT width (width will be animated)
+            progressOverlay.leadingAnchor.constraint(equalTo: yesButton.leadingAnchor),
+            progressOverlay.topAnchor.constraint(equalTo: yesButton.topAnchor),
+            progressOverlay.bottomAnchor.constraint(equalTo: yesButton.bottomAnchor),
+            // REMOVED: progressOverlay.widthAnchor.constraint(equalToConstant: 0)
+            
+            // No button below yes button
+            noButton.topAnchor.constraint(equalTo: yesButton.bottomAnchor, constant: 10),
+            noButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            noButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10)
+        ])
+        
+        // Add button actions
+        yesButton.addTarget(self, action: #selector(activityYesTapped), for: .touchUpInside)
+        noButton.addTarget(self, action: #selector(activityNoTapped), for: .touchUpInside)
+        
+        // Add tap gesture to background
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(activityBackgroundTapped(_:)))
+        container.addGestureRecognizer(tapGesture)
         
         return container
     }()
@@ -417,6 +506,7 @@ class DelayedCameraView: UIView {
     private var clipBackgroundTrailingConstraint: NSLayoutConstraint?
     private var scrubberPlayheadConstraint: NSLayoutConstraint?
     private var scrubberTouchAreaConstraint: NSLayoutConstraint?
+    private var activityProgressConstraint: NSLayoutConstraint?
 
     private let timeLabel: UILabel = {
         let label = UILabel()
@@ -515,14 +605,17 @@ class DelayedCameraView: UIView {
         displayImageView.backgroundColor = .clear
         displayImageView.alpha = 0
         displayImageView.isUserInteractionEnabled = false
+        
         addSubview(displayImageView)
-
         addSubview(countdownLabel)
         addSubview(countdownStopButton)
         addSubview(livePauseButton)
         addSubview(successFeedbackView)
         addSubview(cancelClipButton)
+        
         setupControls()
+        
+        addSubview(activityAlertContainer) //must be after setup controls
 
         NSLayoutConstraint.activate([
             countdownLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -550,7 +643,12 @@ class DelayedCameraView: UIView {
 
             // Cancel button (top left in clip mode)
             cancelClipButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
-            cancelClipButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10)
+            cancelClipButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            
+            // Activity alert - centered
+            activityAlertContainer.centerXAnchor.constraint(equalTo: centerXAnchor),
+            activityAlertContainer.centerYAnchor.constraint(equalTo: centerYAnchor),
+            activityAlertContainer.widthAnchor.constraint(equalToConstant: 340)
         ])
 
         countdownStopButton.addTarget(self, action: #selector(countdownStopTapped), for: .touchUpInside)
@@ -578,6 +676,8 @@ class DelayedCameraView: UIView {
         hideControlsTimer?.invalidate()
         loopTimer?.invalidate()
         recordingDurationTimer?.invalidate()
+        activityCheckTimer?.invalidate()
+        activityCountdownTimer?.invalidate()
         videoFileBuffer?.cleanup()
     }
 
@@ -814,6 +914,8 @@ class DelayedCameraView: UIView {
     @objc private func handleTap() {
         guard isShowingDelayed else { return }
 
+        restartActivityCheckTimer()
+        
         // LIVE mode: Show/hide pause button
         if !isPaused {
             if livePauseButton.alpha == 0 {
@@ -1541,7 +1643,7 @@ class DelayedCameraView: UIView {
                 self.countdownLabel.text = ""
                 
                 // Add camera icon
-                let config = UIImage.SymbolConfiguration(pointSize: 120, weight: .bold)
+                let config = UIImage.SymbolConfiguration(pointSize: 80, weight: .bold)
                 let imageView = UIImageView(image: UIImage(systemName: "video.fill", withConfiguration: config))
                 imageView.tintColor = .white
                 imageView.contentMode = .center
@@ -1577,6 +1679,7 @@ class DelayedCameraView: UIView {
         }
 
         startRecordingIndicator()
+        startActivityCheckTimer()
 
         UIView.animate(withDuration: 0.5) {
             self.previewLayer?.opacity = 0
@@ -1690,6 +1793,13 @@ class DelayedCameraView: UIView {
         stopRecordingIndicator()
         hideLivePauseButton()
         
+        activityCheckTimer?.invalidate()  // Make sure this is here
+        activityCheckTimer = nil
+        activityCountdownTimer?.invalidate()  // Make sure this is here
+        activityCountdownTimer = nil
+        
+        hideActivityCheck()
+        
         metadataLock.lock()
         let totalFrames = frameMetadata.count
         metadataLock.unlock()
@@ -1761,6 +1871,10 @@ class DelayedCameraView: UIView {
         displayTimer = nil
         hideControlsTimer?.invalidate()
         hideControlsTimer = nil
+        
+        activityCheckTimer?.invalidate()
+        activityCountdownTimer?.invalidate()
+        hideActivityCheck()
         
         captureQueue.async { [weak self] in
             guard let self = self else { return }
@@ -2678,6 +2792,197 @@ class DelayedCameraView: UIView {
         RunLoop.main.add(recordingDurationTimer!, forMode: .common)
         print("⏱️ Recording timer started")
     }
+    
+    private func startActivityCheckTimer() {
+        print("⏱️ startActivityCheckTimer() called")
+        activityCheckTimer?.invalidate()
+        
+        print("⏱️ Creating timer with interval: \(activityCheckInterval) seconds")
+        activityCheckTimer = Timer.scheduledTimer(withTimeInterval: activityCheckInterval, repeats: false) { [weak self] timer in  // Changed to repeats: false
+            print("⏱️ TIMER FIRED! Showing activity check")
+            self?.showActivityCheck()
+        }
+        
+        if let timer = activityCheckTimer {
+            RunLoop.main.add(timer, forMode: .common)
+            print("⏱️ Activity check timer started and added to RunLoop")
+            print("⏱️ Timer valid: \(timer.isValid)")
+            print("⏱️ Timer fire date: \(timer.fireDate)")
+        } else {
+            print("❌ Failed to create activity check timer")
+        }
+    }
+    
+    private func showActivityCheck() {
+        print("⚠️ SHOWING ACTIVITY CHECK ALERT")
+        
+        // Bring to front to ensure it's visible
+        bringSubviewToFront(activityAlertContainer)
+        print("🔝 Brought alert to front")
+        
+        activityTimeRemaining = 60
+        
+        // Update button title (no countdown)
+        if let yesButton = activityAlertContainer.viewWithTag(1001) as? UIButton {
+            yesButton.setTitle("Yes, Continue", for: .normal)  // REMOVED countdown
+            print("✅ Updated button title")
+        } else {
+            print("❌ Could not find yes button")
+        }
+        
+        // Show alert
+        print("🎭 Animating alert to alpha 1")
+        UIView.animate(withDuration: 0.3) {
+            self.activityAlertContainer.alpha = 1
+        }
+        
+        // Start countdown timer
+        activityCountdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateActivityCountdown()
+        }
+        RunLoop.main.add(activityCountdownTimer!, forMode: .common)
+        print("⏱️ Countdown timer started")
+        
+        // Start progress animation
+        startProgressAnimation()
+    }
+
+    private func updateActivityCountdown() {
+        guard activityTimeRemaining > 0 else {
+            // Already at 0, don't process again
+            return
+        }
+        
+        activityTimeRemaining -= 1
+        
+        if activityTimeRemaining <= 0 {
+            // Time's up - pause the feed
+            print("⏸️ Activity check timeout - pausing feed")
+            
+            // Stop both timers immediately FIRST
+            activityCountdownTimer?.invalidate()
+            activityCountdownTimer = nil
+            activityCheckTimer?.invalidate()
+            activityCheckTimer = nil
+            
+            // Then hide and pause
+            hideActivityCheck()
+            
+            // Check if already paused before calling pausePlayback
+            if !isPaused {
+                pausePlayback()
+            }
+        }
+    }
+
+    private func startProgressAnimation() {
+        guard let yesButton = activityAlertContainer.viewWithTag(1001) as? UIButton,
+              let progressOverlay = yesButton.viewWithTag(1002) else {
+            print("❌ Could not find progress overlay")
+            return
+        }
+        
+        print("🎬 Starting progress animation")
+        
+        // Remove all animations first
+        progressOverlay.layer.removeAllAnimations()
+        
+        // Remove existing constraint if any
+        if let existingConstraint = activityProgressConstraint {
+            existingConstraint.isActive = false
+        }
+        
+        // Set initial width to 0
+        activityProgressConstraint = progressOverlay.widthAnchor.constraint(equalToConstant: 0)
+        activityProgressConstraint?.isActive = true
+        yesButton.layoutIfNeeded()  // Force layout immediately
+        
+        print("📏 Button width: \(yesButton.bounds.width)")
+        
+        // Animate width to full button width over 60 seconds
+        activityProgressConstraint?.constant = yesButton.bounds.width
+        
+        UIView.animate(withDuration: 60.0, delay: 0, options: [.curveLinear]) {
+            yesButton.layoutIfNeeded()
+        } completion: { [weak self] finished in
+            if finished {
+                print("⏱️ Progress animation completed naturally")
+            }
+        }
+        
+        print("✅ Progress animation started - 0 to \(yesButton.bounds.width) over 60s")
+    }
+
+    @objc private func activityYesTapped() {
+        print("✅ Activity check - Yes tapped")
+        hideActivityCheck()
+        restartActivityCheckTimer()
+    }
+
+    @objc private func activityNoTapped() {
+        print("⏸️ Activity check - No tapped")
+        hideActivityCheck()
+        pausePlayback()
+    }
+
+    @objc private func activityBackgroundTapped(_ gesture: UITapGestureRecognizer) {
+        let location = gesture.location(in: self)  // Changed to self
+        let alertFrame = activityAlertContainer.frame
+        
+        // Check if tap is outside the alert container (treat as yes)
+        if !alertFrame.contains(location) {
+            print("✅ Activity check - Background tapped outside alert (treating as yes)")
+            hideActivityCheck()
+            restartActivityCheckTimer()
+        } else {
+            print("🔘 Tap inside alert container - ignoring")
+        }
+    }
+    
+    private func hideActivityCheck() {
+        activityCountdownTimer?.invalidate()
+        activityCountdownTimer = nil
+        
+        // Stop the animation
+        if let yesButton = activityAlertContainer.viewWithTag(1001) as? UIButton,
+           let progressOverlay = yesButton.viewWithTag(1002) {
+            progressOverlay.layer.removeAllAnimations()
+        }
+        
+        // Clean up progress constraint
+        if let progressConstraint = activityProgressConstraint {
+            progressConstraint.isActive = false
+            activityProgressConstraint = nil
+        }
+        
+        UIView.animate(withDuration: 0.3) {
+            self.activityAlertContainer.alpha = 0
+        }
+    }
+
+    private func restartActivityCheckTimer() {
+        print("🔄 Restarting activity check timer")
+        
+        // Hide alert if currently showing and stop countdown
+        if activityAlertContainer.alpha > 0 {
+            hideActivityCheck()
+        }
+        
+        // Invalidate existing activity check timer
+        activityCheckTimer?.invalidate()
+        
+        // Start fresh timer
+        activityCheckTimer = Timer.scheduledTimer(withTimeInterval: activityCheckInterval, repeats: false) { [weak self] timer in
+            print("⏱️ TIMER FIRED! Showing activity check")
+            self?.showActivityCheck()
+        }
+        
+        if let timer = activityCheckTimer {
+            RunLoop.main.add(timer, forMode: .common)
+            print("⏱️ Activity check timer restarted - next check in \(activityCheckInterval)s")
+        }
+    }
+
 }
 
 // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate

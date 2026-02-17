@@ -35,12 +35,12 @@ class SplashViewController: UIViewController {
         view.addSubview(companyLogoImageView)
         
         NSLayoutConstraint.activate([
-            // Main logo - center with max size and padding
+            // Main logo - center horizontally, shifted up vertically by half the company logo height + spacing
             logoImageView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            logoImageView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            logoImageView.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -(60/2 + 30/2)), // -(height/2 + spacing/2)
             logoImageView.widthAnchor.constraint(lessThanOrEqualToConstant: 400),
             logoImageView.heightAnchor.constraint(lessThanOrEqualToConstant: 400),
-            logoImageView.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.9), // Changed from 0.8 to 0.9
+            logoImageView.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.9),
             logoImageView.heightAnchor.constraint(lessThanOrEqualTo: view.heightAnchor, multiplier: 0.5),
             
             // Company logo - bottom center

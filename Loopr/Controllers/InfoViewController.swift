@@ -155,9 +155,9 @@ class InfoViewController: UIViewController {
         // Add main container to view (now fills entire screen)
         view.addSubview(containerView)
         
-        // Add close button and scroll view to container
-        containerView.addSubview(closeButton)
+        // Add scroll view FIRST, then close button (so button floats on top)
         containerView.addSubview(scrollView)
+        containerView.addSubview(closeButton)  // MOVED: add after scrollView
         
         // Add content view to scroll view
         scrollView.addSubview(contentView)
@@ -179,17 +179,17 @@ class InfoViewController: UIViewController {
             containerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             containerView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             
-            // Close button - top right corner with safe area
+            // Scroll view fills the ENTIRE container (starts at top, not below close button)
+            scrollView.topAnchor.constraint(equalTo: containerView.topAnchor),  // CHANGED: was closeButton.bottomAnchor
+            scrollView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            
+            // Close button - floats on top right corner with safe area
             closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             closeButton.widthAnchor.constraint(equalToConstant: 44),
             closeButton.heightAnchor.constraint(equalToConstant: 44),
-            
-            // Scroll view fills the container (below close button)
-            scrollView.topAnchor.constraint(equalTo: closeButton.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
             
             // Rest of constraints remain the same...
             contentView.topAnchor.constraint(equalTo: scrollView.topAnchor),
