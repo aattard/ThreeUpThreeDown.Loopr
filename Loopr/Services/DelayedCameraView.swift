@@ -22,6 +22,9 @@ class DelayedCameraView: UIView {
     private var isActive: Bool = false
     private var isShowingDelayed: Bool = false
     private var isPaused: Bool = false
+    
+    private var recordingDurationTimer: Timer?
+    private var recordingStartTime: TimeInterval = 0
 
     private var displayTimer: Timer?
     private var displayImageView: UIImageView!
@@ -86,54 +89,81 @@ class DelayedCameraView: UIView {
     private let recordingIndicator: UIView = {
         let container = UIView()
         container.backgroundColor = UIColor.systemRed
-        container.layer.cornerRadius = 18  // Half of height for pill shape
+        container.layer.cornerRadius = 18 // Half of height for pill shape
         container.translatesAutoresizingMaskIntoConstraints = false
         container.alpha = 0
-
+        
         // Blinking dot
         let dot = UIView()
         dot.backgroundColor = .white
         dot.layer.cornerRadius = 4
         dot.translatesAutoresizingMaskIntoConstraints = false
-        dot.tag = 999  // For accessing later for blink animation
-
-        // "LIVE" label
+        dot.tag = 999 // For accessing later for blink animation
+        
+        // LIVE label
         let liveLabel = UILabel()
         liveLabel.text = "LIVE"
         liveLabel.textColor = .white
         liveLabel.font = UIFont.systemFont(ofSize: 14, weight: .bold)
         liveLabel.translatesAutoresizingMaskIntoConstraints = false
-        liveLabel.tag = 998  // For accessing later
-
-        // Delay label (shows "-7s")
+        liveLabel.tag = 998 // For accessing later
+        
+        // NEW: Rounded rectangle background for delay label
+        let delayBackground = UIView()
+        delayBackground.backgroundColor = UIColor.white
+        delayBackground.layer.cornerRadius = 8 // Rounded corners
+        delayBackground.translatesAutoresizingMaskIntoConstraints = false
+        
+        // Delay label (shows -7s) - EXTRA BOLD
         let delayLabel = UILabel()
         delayLabel.text = "-7s"
-        delayLabel.textColor = .white.withAlphaComponent(0.9)
-        delayLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
+        delayLabel.textColor = UIColor.systemRed
+        delayLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .heavy)
+        delayLabel.textAlignment = .center
         delayLabel.translatesAutoresizingMaskIntoConstraints = false
-        delayLabel.tag = 997  // For updating with actual delay
-
+        delayLabel.tag = 997 // For updating with actual delay
+        
+        // Duration label (shows 00:00:00) - THIN
+        let durationLabel = UILabel()
+        durationLabel.text = "00:00:00"
+        durationLabel.textColor = .white
+        durationLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .light)
+        durationLabel.translatesAutoresizingMaskIntoConstraints = false
+        durationLabel.tag = 996 // For updating with duration
+        
         container.addSubview(dot)
         container.addSubview(liveLabel)
-        container.addSubview(delayLabel)
-
+        container.addSubview(delayBackground)
+        delayBackground.addSubview(delayLabel)  // Add label inside background
+        container.addSubview(durationLabel)
+        
         NSLayoutConstraint.activate([
             // Dot on the left
             dot.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             dot.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             dot.widthAnchor.constraint(equalToConstant: 8),
             dot.heightAnchor.constraint(equalToConstant: 8),
-
-            // "LIVE" label next to dot
+            
+            // LIVE label next to dot
             liveLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 6),
             liveLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-
-            // Delay label after "LIVE"
-            delayLabel.leadingAnchor.constraint(equalTo: liveLabel.trailingAnchor, constant: 3),
-            delayLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            delayLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+            
+            // Delay background after LIVE
+            delayBackground.leadingAnchor.constraint(equalTo: liveLabel.trailingAnchor, constant: 5),
+            delayBackground.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            
+            // Delay label with padding inside background
+            delayLabel.topAnchor.constraint(equalTo: delayBackground.topAnchor, constant: 4),
+            delayLabel.bottomAnchor.constraint(equalTo: delayBackground.bottomAnchor, constant: -4),
+            delayLabel.leadingAnchor.constraint(equalTo: delayBackground.leadingAnchor, constant: 6),
+            delayLabel.trailingAnchor.constraint(equalTo: delayBackground.trailingAnchor, constant: -6),
+            
+            // Duration label after delay background
+            durationLabel.leadingAnchor.constraint(equalTo: delayBackground.trailingAnchor, constant: 6),
+            durationLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            durationLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         ])
-
+        
         return container
     }()
 
@@ -547,6 +577,7 @@ class DelayedCameraView: UIView {
         NotificationCenter.default.removeObserver(self)
         hideControlsTimer?.invalidate()
         loopTimer?.invalidate()
+        recordingDurationTimer?.invalidate()
         videoFileBuffer?.cleanup()
     }
 
@@ -832,10 +863,12 @@ class DelayedCameraView: UIView {
     }
 
     private func startRecordingIndicator() {
+        // Show the indicator with animation
         UIView.animate(withDuration: 0.3) {
             self.recordingIndicator.alpha = 1
         }
-
+        
+        // Start blinking dot animation
         if let dot = recordingIndicator.viewWithTag(999) {
             let blink = CABasicAnimation(keyPath: "opacity")
             blink.fromValue = 1.0
@@ -846,12 +879,29 @@ class DelayedCameraView: UIView {
             dot.layer.add(blink, forKey: "blinking")
         }
     }
+    
+    private func updateRecordingDuration() {
+        guard let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel else { return }
+        
+        let elapsed = CACurrentMediaTime() - recordingStartTime
+        let hours = Int(elapsed) / 3600
+        let minutes = (Int(elapsed) % 3600) / 60
+        let seconds = Int(elapsed) % 60
+        
+        durationLabel.text = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+    }
 
     private func stopRecordingIndicator() {
+        // Stop the duration timer
+        recordingDurationTimer?.invalidate()
+        recordingDurationTimer = nil
+        
+        // Stop blinking animation
         if let dot = recordingIndicator.viewWithTag(999) {
             dot.layer.removeAnimation(forKey: "blinking")
         }
-
+        
+        // Hide the indicator
         UIView.animate(withDuration: 0.3) {
             self.recordingIndicator.alpha = 0
         }
@@ -2615,6 +2665,19 @@ class DelayedCameraView: UIView {
         
         return super.hitTest(point, with: event)
     }
+    
+    private func startRecordingTimer() {
+        // Start the timer at 0 when first frame is captured
+        //recordingStartTime = CACurrentMediaTime()
+        recordingStartTime = CACurrentMediaTime() + Double(delaySeconds)
+        
+        // Start the duration timer
+        recordingDurationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateRecordingDuration()
+        }
+        RunLoop.main.add(recordingDurationTimer!, forMode: .common)
+        print("⏱️ Recording timer started")
+    }
 }
 
 // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
@@ -2636,6 +2699,10 @@ extension DelayedCameraView: AVCaptureVideoDataOutputSampleBufferDelegate {
 
             if count == 1 {
                 print("🎬 First frame captured to file!")
+                // START THE TIMER HERE - when recording actually begins
+                DispatchQueue.main.async {
+                    self.startRecordingTimer()
+                }
             } else {
                 let actualFPS = Settings.shared.currentFPS(isFrontCamera: self.isFrontCamera)
                 if count % (actualFPS * 10) == 0 {  // Log every 10 seconds
