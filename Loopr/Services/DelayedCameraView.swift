@@ -4,499 +4,467 @@ import Photos
 
 class DelayedCameraView: UIView {
 
+    // MARK: - Capture
+
     private var captureSession: AVCaptureSession!
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var videoDataOutput: AVCaptureVideoDataOutput?
     private var isFrontCamera: Bool = false
     private var currentDevice: AVCaptureDevice?
-
-    // NEW: Callback for when session stops
     var onSessionStopped: (() -> Void)?
 
-    // NEW: Replace frameBuffer with VideoFileBuffer
+    // MARK: - Buffer
+
     private var videoFileBuffer: VideoFileBuffer?
-    private var frameMetadata: [(timestamp: CMTime, index: Int)] = []
-    private let metadataLock = NSLock()
+
+    // MARK: - State
 
     private var delaySeconds: Int = 7
     private var isActive: Bool = false
     private var isShowingDelayed: Bool = false
     private var isPaused: Bool = false
-    
+
+    // MARK: - Recording indicator
+
     private var recordingDurationTimer: Timer?
     private var recordingStartTime: TimeInterval = 0
 
+    // MARK: - Live-delay display
+
     private var displayTimer: Timer?
     private var displayImageView: UIImageView!
-    
+
+    // MARK: - Activity check
+
     private var activityCheckTimer: Timer?
     private var activityCountdownTimer: Timer?
     private var activityTimeRemaining: Int = 60
-    private let activityCheckInterval: TimeInterval = 2700 // Change to 1800 for 30 minutes, 2700 for 45
+    private let activityCheckInterval: TimeInterval = 2700
 
-    // Scrubbing properties
-    private var scrubberPosition: Int = 0
-    private var lastUpdateTime: TimeInterval = 0
+    // MARK: - AVPlayer (scrub + playback)
 
-    // NEW: Loop playback properties
+    /// The player used for both scrubbing (seek while paused) and
+    /// looped playback (play.rate = 1).
+    private var player: AVPlayer?
+    private var playerLayer: AVPlayerLayer?
+    private var playerTimeObserver: Any?
+    private var playerLoopObserver: NSObjectProtocol?
+
+    /// True while a seek is already in-flight on the player.
+    /// We gate new scrub seeks on this flag so we never stack them.
+    private var isSeeking: Bool = false
+    /// The frame index the user last requested while a seek was in flight.
+    /// If non-nil it is dispatched as soon as the current seek completes.
+    private var pendingScrubIndex: Int?
+
+    // MARK: - Scrub / loop
+
+    private var scrubberPosition: Int = 0   // global frame index
     private var isLooping: Bool = false
-    private var loopTimer: Timer?
-    private var loopFrameIndex: Int = 0
 
-    // Clip selection properties
-    private var clipStartIndex: Int = 0
-    private var clipEndIndex: Int = 0
-    private var isClipMode: Bool = false
-    private var clipPlayheadPosition: Int = 0  // Current position within clip
+    // MARK: - Clip selection
 
-    // Pan gesture tracking
-    private var initialLeftPosition: CGFloat = 0
-    private var initialRightPosition: CGFloat = 0
+    private var clipStartIndex: Int    = 0
+    private var clipEndIndex: Int      = 0
+    private var isClipMode: Bool       = false
+    private var clipPlayheadPosition: Int = 0
+
+    // MARK: - Pan gesture tracking
+
+    private var initialLeftPosition: CGFloat    = 0
+    private var initialRightPosition: CGFloat   = 0
     private var initialPlayheadPosition: CGFloat = 0
-    private var initialClipStartIndex: Int = 0
-    private var initialClipEndIndex: Int = 0
+    private var initialClipStartIndex: Int      = 0
+    private var initialClipEndIndex: Int        = 0
     private var initialClipPlayheadPosition: Int = 0
+    private var isDraggingHandle: Bool          = false
+    private var lastUpdateTime: TimeInterval    = 0
 
-    // Current display state
+    // MARK: - Display
+
     private var currentDisplayFrameIndex: Int = 0
 
-    // Track if handle is being dragged
-    private var isDraggingHandle: Bool = false
+    // MARK: - Config
+
+    private let scrubDurationSeconds: Int = 300
+    private let handleWidth: CGFloat      = 20
+    private lazy var captureQueue = DispatchQueue(
+        label: "com.loopr.capture", qos: .userInteractive)
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    // MARK: - UI — countdown / pause overlay
 
     private let countdownLabel: UILabel = {
-        let label = UILabel()
-        label.font = .systemFont(ofSize: 120, weight: .bold)
-        label.textColor = .white
-        label.textAlignment = .center
-        label.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        label.layer.cornerRadius = 20
-        label.clipsToBounds = true
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
+        let l = UILabel()
+        l.font = .systemFont(ofSize: 120, weight: .bold)
+        l.textColor = .white
+        l.textAlignment = .center
+        l.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        l.layer.cornerRadius = 20
+        l.clipsToBounds = true
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
     }()
 
-    // Stop button during countdown (matches home screen style)
     private let countdownStopButton: UIButton = {
-        let button = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 90, weight: .bold)
-        let image = UIImage(systemName: "xmark.circle.fill", withConfiguration: config)
-        button.setImage(image, for: .normal)
-        button.tintColor = .white
-        button.backgroundColor = .black
-        button.layer.borderWidth = 2
-        button.layer.borderColor = UIColor.black.cgColor
-        button.layer.cornerRadius = 60  // Matches 120×120 size
-        button.clipsToBounds = true
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 90, weight: .bold)
+        b.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: cfg), for: .normal)
+        b.tintColor = .white
+        b.backgroundColor = .black
+        b.layer.borderWidth = 2
+        b.layer.borderColor = UIColor.black.cgColor
+        b.layer.cornerRadius = 60
+        b.clipsToBounds = true
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
     }()
+
+    private let livePauseButton: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 90, weight: .bold)
+        b.setImage(UIImage(systemName: "pause.circle.fill", withConfiguration: cfg), for: .normal)
+        b.tintColor = .white
+        b.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        b.layer.cornerRadius = 60
+        b.clipsToBounds = true
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.alpha = 0
+        return b
+    }()
+
+    private let successFeedbackView: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        v.layer.cornerRadius = 20
+        v.clipsToBounds = true
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.alpha = 0
+        let cfg = UIImage.SymbolConfiguration(pointSize: 120, weight: .bold)
+        let iv = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: cfg))
+        iv.tintColor = .white
+        iv.contentMode = .center
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(iv)
+        NSLayoutConstraint.activate([
+            iv.centerXAnchor.constraint(equalTo: v.centerXAnchor),
+            iv.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+            iv.widthAnchor.constraint(equalToConstant: 150),
+            iv.heightAnchor.constraint(equalToConstant: 150)
+        ])
+        return v
+    }()
+
+    // MARK: - UI — recording indicator
 
     private let recordingIndicator: UIView = {
-        let container = UIView()
-        container.backgroundColor = UIColor.systemRed
-        container.layer.cornerRadius = 18 // Half of height for pill shape
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.alpha = 0
-        
-        // Blinking dot
-        let dot = UIView()
-        dot.backgroundColor = .white
-        dot.layer.cornerRadius = 4
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        dot.tag = 999 // For accessing later for blink animation
-        
-        // LIVE label
-        let liveLabel = UILabel()
-        liveLabel.text = "LIVE"
-        liveLabel.textColor = .white
-        liveLabel.font = UIFont.systemFont(ofSize: 14, weight: .bold)
-        liveLabel.translatesAutoresizingMaskIntoConstraints = false
-        liveLabel.tag = 998 // For accessing later
-        
-        // NEW: Rounded rectangle background for delay label
-        let delayBackground = UIView()
-        delayBackground.backgroundColor = UIColor.white
-        delayBackground.layer.cornerRadius = 8 // Rounded corners
-        delayBackground.translatesAutoresizingMaskIntoConstraints = false
-        
-        // Delay label (shows -7s) - EXTRA BOLD
-        let delayLabel = UILabel()
-        delayLabel.text = "-7s"
-        delayLabel.textColor = UIColor.systemRed
-        delayLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .heavy)
-        delayLabel.textAlignment = .center
-        delayLabel.translatesAutoresizingMaskIntoConstraints = false
-        delayLabel.tag = 997 // For updating with actual delay
-        
-        // Duration label (shows 00:00:00) - THIN
-        let durationLabel = UILabel()
-        durationLabel.text = "00:00:00"
-        durationLabel.textColor = .white
-        durationLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .light)
-        durationLabel.translatesAutoresizingMaskIntoConstraints = false
-        durationLabel.tag = 996 // For updating with duration
-        
-        container.addSubview(dot)
-        container.addSubview(liveLabel)
-        container.addSubview(delayBackground)
-        delayBackground.addSubview(delayLabel)  // Add label inside background
-        container.addSubview(durationLabel)
-        
+        let c = UIView()
+        c.backgroundColor = .systemRed
+        c.layer.cornerRadius = 18
+        c.translatesAutoresizingMaskIntoConstraints = false
+        c.alpha = 0
+
+        let dot = UIView(); dot.backgroundColor = .white; dot.layer.cornerRadius = 4
+        dot.translatesAutoresizingMaskIntoConstraints = false; dot.tag = 999
+
+        let live = UILabel(); live.text = "LIVE"; live.textColor = .white
+        live.font = .systemFont(ofSize: 14, weight: .bold)
+        live.translatesAutoresizingMaskIntoConstraints = false; live.tag = 998
+
+        let bg = UIView(); bg.backgroundColor = .white; bg.layer.cornerRadius = 8
+        bg.translatesAutoresizingMaskIntoConstraints = false
+
+        let delay = UILabel(); delay.text = "-7s"
+        delay.textColor = .systemRed
+        delay.font = .monospacedDigitSystemFont(ofSize: 12, weight: .heavy)
+        delay.textAlignment = .center
+        delay.translatesAutoresizingMaskIntoConstraints = false; delay.tag = 997
+
+        let dur = UILabel(); dur.text = "00:00:00"; dur.textColor = .white
+        dur.font = .monospacedDigitSystemFont(ofSize: 14, weight: .light)
+        dur.translatesAutoresizingMaskIntoConstraints = false; dur.tag = 996
+
+        c.addSubview(dot); c.addSubview(live); c.addSubview(bg)
+        bg.addSubview(delay); c.addSubview(dur)
+
         NSLayoutConstraint.activate([
-            // Dot on the left
-            dot.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            dot.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            dot.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 12),
+            dot.centerYAnchor.constraint(equalTo: c.centerYAnchor),
             dot.widthAnchor.constraint(equalToConstant: 8),
             dot.heightAnchor.constraint(equalToConstant: 8),
-            
-            // LIVE label next to dot
-            liveLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 6),
-            liveLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            
-            // Delay background after LIVE
-            delayBackground.leadingAnchor.constraint(equalTo: liveLabel.trailingAnchor, constant: 5),
-            delayBackground.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            
-            // Delay label with padding inside background
-            delayLabel.topAnchor.constraint(equalTo: delayBackground.topAnchor, constant: 4),
-            delayLabel.bottomAnchor.constraint(equalTo: delayBackground.bottomAnchor, constant: -4),
-            delayLabel.leadingAnchor.constraint(equalTo: delayBackground.leadingAnchor, constant: 6),
-            delayLabel.trailingAnchor.constraint(equalTo: delayBackground.trailingAnchor, constant: -6),
-            
-            // Duration label after delay background
-            durationLabel.leadingAnchor.constraint(equalTo: delayBackground.trailingAnchor, constant: 6),
-            durationLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            durationLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+            live.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 6),
+            live.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+            bg.leadingAnchor.constraint(equalTo: live.trailingAnchor, constant: 5),
+            bg.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+            delay.topAnchor.constraint(equalTo: bg.topAnchor, constant: 4),
+            delay.bottomAnchor.constraint(equalTo: bg.bottomAnchor, constant: -4),
+            delay.leadingAnchor.constraint(equalTo: bg.leadingAnchor, constant: 6),
+            delay.trailingAnchor.constraint(equalTo: bg.trailingAnchor, constant: -6),
+            dur.leadingAnchor.constraint(equalTo: bg.trailingAnchor, constant: 6),
+            dur.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -12),
+            dur.centerYAnchor.constraint(equalTo: c.centerYAnchor)
         ])
-        
-        return container
+        return c
     }()
-    
+
+    // MARK: - UI — activity alert
+
     private lazy var activityAlertContainer: UIView = {
-        let container = UIView()
-        container.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        container.layer.cornerRadius = 20
-        container.clipsToBounds = true
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.alpha = 0
-        
-        // Message label
-        let messageLabel = UILabel()
-        messageLabel.text = "Are you still there?"
-        messageLabel.font = UIFont.systemFont(ofSize: 32, weight: .semibold)
-        messageLabel.textColor = .white
-        messageLabel.textAlignment = .center
-        messageLabel.numberOfLines = 0
-        messageLabel.translatesAutoresizingMaskIntoConstraints = false
-        
-        // Yes button with progress background
-        let yesButton = UIButton(type: .system)
-        yesButton.setTitle("Yes, Continue", for: .normal)
-        yesButton.titleLabel?.font = UIFont.systemFont(ofSize: 20, weight: .bold)
-        yesButton.setTitleColor(.white, for: .normal)
-        yesButton.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
-        yesButton.layer.cornerRadius = 12
-        yesButton.layer.borderWidth = 1  // ADD THIS
-        yesButton.layer.borderColor = UIColor.black.withAlphaComponent(1.0).cgColor  // ADD THIS
-        yesButton.clipsToBounds = true
-        yesButton.translatesAutoresizingMaskIntoConstraints = false
-        yesButton.tag = 1001
-        
-        // Progress overlay - darker overlay that expands left to right
-        let progressOverlay = UIView()
-        progressOverlay.backgroundColor = UIColor.black.withAlphaComponent(0.4)
-        progressOverlay.translatesAutoresizingMaskIntoConstraints = false
-        progressOverlay.tag = 1002
-        yesButton.insertSubview(progressOverlay, at: 0)
-        
-        // No button (smaller text link)
-        let noButton = UIButton(type: .system)
-        noButton.setTitle("No, Pause", for: .normal)
-        noButton.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .regular)
-        noButton.setTitleColor(.white.withAlphaComponent(0.7), for: .normal)
-        noButton.translatesAutoresizingMaskIntoConstraints = false
-        noButton.tag = 1003
-        
-        container.addSubview(messageLabel)
-        container.addSubview(yesButton)
-        container.addSubview(noButton)
-        
+        let c = UIView()
+        c.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        c.layer.cornerRadius = 20; c.clipsToBounds = true
+        c.translatesAutoresizingMaskIntoConstraints = false; c.alpha = 0
+
+        let msg = UILabel()
+        msg.text = "Are you still there?"
+        msg.font = .systemFont(ofSize: 32, weight: .semibold)
+        msg.textColor = .white; msg.textAlignment = .center; msg.numberOfLines = 0
+        msg.translatesAutoresizingMaskIntoConstraints = false
+
+        let yes = UIButton(type: .system)
+        yes.setTitle("Yes, Continue", for: .normal)
+        yes.titleLabel?.font = .systemFont(ofSize: 20, weight: .bold)
+        yes.setTitleColor(.white, for: .normal)
+        yes.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1)
+        yes.layer.cornerRadius = 12; yes.layer.borderWidth = 1
+        yes.layer.borderColor = UIColor.black.cgColor; yes.clipsToBounds = true
+        yes.translatesAutoresizingMaskIntoConstraints = false; yes.tag = 1001
+
+        let prog = UIView()
+        prog.backgroundColor = UIColor.black.withAlphaComponent(0.4)
+        prog.translatesAutoresizingMaskIntoConstraints = false; prog.tag = 1002
+        yes.insertSubview(prog, at: 0)
+
+        let no = UIButton(type: .system)
+        no.setTitle("No, Pause", for: .normal)
+        no.titleLabel?.font = .systemFont(ofSize: 16, weight: .regular)
+        no.setTitleColor(UIColor.white.withAlphaComponent(0.7), for: .normal)
+        no.translatesAutoresizingMaskIntoConstraints = false; no.tag = 1003
+
+        c.addSubview(msg); c.addSubview(yes); c.addSubview(no)
         NSLayoutConstraint.activate([
-            // Message at top
-            messageLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 40),
-            messageLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 30),
-            messageLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -30),
-            
-            // Yes button below message
-            yesButton.topAnchor.constraint(equalTo: messageLabel.bottomAnchor, constant: 40),
-            yesButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 30),
-            yesButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -30),
-            yesButton.heightAnchor.constraint(equalToConstant: 56),
-            
-            // Progress overlay - only set position, NOT width (width will be animated)
-            progressOverlay.leadingAnchor.constraint(equalTo: yesButton.leadingAnchor),
-            progressOverlay.topAnchor.constraint(equalTo: yesButton.topAnchor),
-            progressOverlay.bottomAnchor.constraint(equalTo: yesButton.bottomAnchor),
-            // REMOVED: progressOverlay.widthAnchor.constraint(equalToConstant: 0)
-            
-            // No button below yes button
-            noButton.topAnchor.constraint(equalTo: yesButton.bottomAnchor, constant: 10),
-            noButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            noButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10)
+            msg.topAnchor.constraint(equalTo: c.topAnchor, constant: 40),
+            msg.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 30),
+            msg.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -30),
+            yes.topAnchor.constraint(equalTo: msg.bottomAnchor, constant: 40),
+            yes.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 30),
+            yes.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -30),
+            yes.heightAnchor.constraint(equalToConstant: 56),
+            prog.leadingAnchor.constraint(equalTo: yes.leadingAnchor),
+            prog.topAnchor.constraint(equalTo: yes.topAnchor),
+            prog.bottomAnchor.constraint(equalTo: yes.bottomAnchor),
+            no.topAnchor.constraint(equalTo: yes.bottomAnchor, constant: 10),
+            no.centerXAnchor.constraint(equalTo: c.centerXAnchor),
+            no.bottomAnchor.constraint(equalTo: c.bottomAnchor, constant: -10)
         ])
-        
-        // Add button actions
-        yesButton.addTarget(self, action: #selector(activityYesTapped), for: .touchUpInside)
-        noButton.addTarget(self, action: #selector(activityNoTapped), for: .touchUpInside)
-        
-        // Add tap gesture to background
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(activityBackgroundTapped(_:)))
-        container.addGestureRecognizer(tapGesture)
-        
-        return container
+        yes.addTarget(self, action: #selector(activityYesTapped), for: .touchUpInside)
+        no.addTarget(self,  action: #selector(activityNoTapped),  for: .touchUpInside)
+        let tap = UITapGestureRecognizer(target: self,
+                                         action: #selector(activityBackgroundTapped(_:)))
+        c.addGestureRecognizer(tap)
+        return c
     }()
 
-    // NEW: Live pause button - SAME SIZE as countdown stop button (120x120)
-    private let livePauseButton: UIButton = {
-        let button = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 90, weight: .bold)
-        let image = UIImage(systemName: "pause.circle.fill", withConfiguration: config)
-        button.setImage(image, for: .normal)
-        button.tintColor = .white
-        button.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        button.layer.cornerRadius = 60  // Matches 120×120 size
-        button.clipsToBounds = true
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.alpha = 0
-        return button
-    }()
+    // MARK: - UI — controls container
 
-    // Success feedback view (like countdown)
-    private let successFeedbackView: UIView = {
-        let view = UIView()
-        view.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        view.layer.cornerRadius = 20
-        view.clipsToBounds = true
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.alpha = 0
-
-        let config = UIImage.SymbolConfiguration(pointSize: 120, weight: .bold)
-        let imageView = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: config))
-        imageView.tintColor = .white
-        imageView.contentMode = .center
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-
-        view.addSubview(imageView)
-
-        NSLayoutConstraint.activate([
-            imageView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            imageView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            imageView.widthAnchor.constraint(equalToConstant: 150),
-            imageView.heightAnchor.constraint(equalToConstant: 150)
-        ])
-
-        return view
-    }()
-
-    // YouTube-style controls
     private let controlsContainer: UIView = {
-        let view = UIView()
-        view.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        view.layer.cornerRadius = 40
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.alpha = 0
-        return view
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        v.layer.cornerRadius = 40
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.alpha = 0
+        return v
     }()
 
     private let playPauseButton: UIButton = {
-        let button = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let image = UIImage(systemName: "play.circle.fill", withConfiguration: config)
-        button.setImage(image, for: .normal)
-        button.tintColor = .white
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        b.setImage(UIImage(systemName: "play.circle.fill", withConfiguration: cfg), for: .normal)
+        b.tintColor = .white
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
     }()
 
-    // Integrated clip/scrub timeline
     private let timelineContainer: UIView = {
-        let view = UIView()
-        view.backgroundColor = .clear
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.clipsToBounds = false  // ADD THIS - allow touch area to extend beyond visible bounds
-        return view
+        let v = UIView(); v.backgroundColor = .clear
+        v.translatesAutoresizingMaskIntoConstraints = false; v.clipsToBounds = false
+        return v
     }()
 
-    // NEW: Scrubber background (purple bar like clip mode)
     private let scrubberBackground: UIView = {
-        let view = UIView()
-        view.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
-        view.layer.cornerRadius = 6
-        view.translatesAutoresizingMaskIntoConstraints = false
-        return view
+        let v = UIView()
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1)
+        v.layer.cornerRadius = 6
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
     }()
 
-    // NEW: Scrubber playhead (white line)
     private let scrubberPlayhead: UIView = {
-        let view = UIView()
-        view.backgroundColor = .white
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isUserInteractionEnabled = false
-        return view
+        let v = UIView(); v.backgroundColor = .white
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isUserInteractionEnabled = false
+        return v
     }()
 
-    // NEW: Scrubber playhead knob (white circle at top)
     private let scrubberPlayheadKnob: UIView = {
-        let view = UIView()
-        view.backgroundColor = .white
-        view.layer.cornerRadius = 8
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isUserInteractionEnabled = false
-        return view
+        let v = UIView(); v.backgroundColor = .white; v.layer.cornerRadius = 8
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isUserInteractionEnabled = false
+        return v
     }()
 
-    // NEW: Scrubber touch area (44px wide for easy dragging)
     private let scrubberTouchArea: UIView = {
-        let view = UIView()
-        view.backgroundColor = .clear
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isUserInteractionEnabled = true
-        return view
+        let v = UIView(); v.backgroundColor = .clear
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isUserInteractionEnabled = true
+        return v
     }()
 
     private let leftDimView: UIView = {
-        let view = UIView()
-        view.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.5)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        
-        // Round ONLY left corners
-        view.layer.cornerRadius = 6
-        view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
-        
-        return view
+        let v = UIView()
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.5)
+        v.translatesAutoresizingMaskIntoConstraints = false; v.isHidden = true
+        v.layer.cornerRadius = 6
+        v.layer.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
+        return v
     }()
 
     private let rightDimView: UIView = {
-        let view = UIView()
-        view.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.5)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        
-        // Round ONLY right corners
-        view.layer.cornerRadius = 6
-        view.layer.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
-        
-        return view
+        let v = UIView()
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.5)
+        v.translatesAutoresizingMaskIntoConstraints = false; v.isHidden = true
+        v.layer.cornerRadius = 6
+        v.layer.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
+        return v
     }()
 
-    // NEW: Clip region background (purple)
     private let clipRegionBackground: UIView = {
-        let view = UIView()
-        view.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
-        view.layer.cornerRadius = 6
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        return view
+        let v = UIView()
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1)
+        v.layer.cornerRadius = 6
+        v.translatesAutoresizingMaskIntoConstraints = false; v.isHidden = true
+        return v
     }()
 
     private let leftTrimHandle: UIView = {
-        let view = UIView()
-        view.backgroundColor = .systemYellow
-        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
-        view.layer.cornerRadius = 3
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        view.isUserInteractionEnabled = true
-
-        let chevron = UIImageView(image: UIImage(systemName: "chevron.compact.left"))
-        chevron.tintColor = .black
-        chevron.contentMode = .center
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(chevron)
-
+        let v = UIView(); v.backgroundColor = .systemYellow; v.layer.cornerRadius = 3
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isHidden = true; v.isUserInteractionEnabled = true
+        let ch = UIImageView(image: UIImage(systemName: "chevron.compact.left"))
+        ch.tintColor = .black; ch.contentMode = .center
+        ch.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(ch)
         NSLayoutConstraint.activate([
-            chevron.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            chevron.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            chevron.widthAnchor.constraint(equalToConstant: 12),
-            chevron.heightAnchor.constraint(equalToConstant: 20)
+            ch.centerXAnchor.constraint(equalTo: v.centerXAnchor),
+            ch.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+            ch.widthAnchor.constraint(equalToConstant: 12),
+            ch.heightAnchor.constraint(equalToConstant: 20)
         ])
-
-        return view
+        return v
     }()
 
     private let rightTrimHandle: UIView = {
-        let view = UIView()
-        view.backgroundColor = .systemYellow
-        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
-        view.layer.cornerRadius = 3
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        view.isUserInteractionEnabled = true
-
-        let chevron = UIImageView(image: UIImage(systemName: "chevron.compact.right"))
-        chevron.tintColor = .black
-        chevron.contentMode = .center
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(chevron)
-
+        let v = UIView(); v.backgroundColor = .systemYellow; v.layer.cornerRadius = 3
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isHidden = true; v.isUserInteractionEnabled = true
+        let ch = UIImageView(image: UIImage(systemName: "chevron.compact.right"))
+        ch.tintColor = .black; ch.contentMode = .center
+        ch.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(ch)
         NSLayoutConstraint.activate([
-            chevron.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            chevron.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            chevron.widthAnchor.constraint(equalToConstant: 12),
-            chevron.heightAnchor.constraint(equalToConstant: 20)
+            ch.centerXAnchor.constraint(equalTo: v.centerXAnchor),
+            ch.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+            ch.widthAnchor.constraint(equalToConstant: 12),
+            ch.heightAnchor.constraint(equalToConstant: 20)
         ])
-
-        return view
+        return v
     }()
 
     private let topBorder: UIView = {
-        let view = UIView()
-        view.backgroundColor = .systemYellow
-        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        return view
+        let v = UIView(); v.backgroundColor = .systemYellow
+        v.translatesAutoresizingMaskIntoConstraints = false; v.isHidden = true
+        return v
     }()
 
     private let bottomBorder: UIView = {
-        let view = UIView()
-        view.backgroundColor = .systemYellow
-        //view.backgroundColor = UIColor(red:0.000, green:0.451, blue:0.731, alpha:1.000)
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        return view
+        let v = UIView(); v.backgroundColor = .systemYellow
+        v.translatesAutoresizingMaskIntoConstraints = false; v.isHidden = true
+        return v
     }()
 
-    // Clip playhead for scrubbing within the selected region
     private let clipPlayhead: UIView = {
-        let view = UIView()
-        view.backgroundColor = .white
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isHidden = true
-        view.isUserInteractionEnabled = false
-        return view
+        let v = UIView(); v.backgroundColor = .white
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isHidden = true; v.isUserInteractionEnabled = false
+        return v
     }()
 
     private let clipPlayheadKnob: UIView = {
-        let view = UIView()
-        view.backgroundColor = .white
-        view.layer.cornerRadius = 8
-        view.layer.borderWidth = 2
-        view.layer.borderColor = UIColor.systemYellow.cgColor
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isUserInteractionEnabled = false
-        return view
+        let v = UIView(); v.backgroundColor = .white; v.layer.cornerRadius = 8
+        v.layer.borderWidth = 2; v.layer.borderColor = UIColor.systemYellow.cgColor
+        v.translatesAutoresizingMaskIntoConstraints = false; v.isUserInteractionEnabled = false
+        return v
     }()
 
-    // Invisible touch area for easier dragging
     private let playheadTouchArea: UIView = {
-        let view = UIView()
-        view.backgroundColor = .clear
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.isUserInteractionEnabled = true
-        return view
+        let v = UIView(); v.backgroundColor = .clear
+        v.translatesAutoresizingMaskIntoConstraints = false; v.isUserInteractionEnabled = true
+        return v
     }()
+
+    private let timeLabel: UILabel = {
+        let l = UILabel(); l.text = "LIVE"
+        l.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
+        l.textColor = .white
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
+
+    private let clipSaveButton: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        b.setImage(UIImage(systemName: "film.circle.fill", withConfiguration: cfg), for: .normal)
+        b.tintColor = .white; b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
+
+    private let topRightButtonContainer: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        v.layer.cornerRadius = 32
+        v.translatesAutoresizingMaskIntoConstraints = false; v.alpha = 0
+        return v
+    }()
+
+    private let stopSessionButton: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        b.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: cfg), for: .normal)
+        b.tintColor = .systemRed; b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
+
+    private let restartButton: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        b.setImage(UIImage(systemName: "arrow.clockwise.circle.fill", withConfiguration: cfg), for: .normal)
+        b.tintColor = .systemGreen; b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
+
+    private let cancelClipButton: UIButton = {
+        let b = UIButton(type: .system)
+        b.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        b.layer.cornerRadius = 18; b.clipsToBounds = true
+        b.setTitle("Cancel", for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        b.setTitleColor(.white, for: .normal)
+        b.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        b.translatesAutoresizingMaskIntoConstraints = false; b.isHidden = true
+        return b
+    }()
+
+    // MARK: - Layout constraints (mutable)
 
     private var leftHandleConstraint: NSLayoutConstraint?
     private var rightHandleConstraint: NSLayoutConstraint?
@@ -508,92 +476,11 @@ class DelayedCameraView: UIView {
     private var scrubberTouchAreaConstraint: NSLayoutConstraint?
     private var activityProgressConstraint: NSLayoutConstraint?
 
-    private let timeLabel: UILabel = {
-        let label = UILabel()
-        label.text = "LIVE"
-        label.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
-        label.textColor = .white
-        label.translatesAutoresizingMaskIntoConstraints = false
-        return label
-    }()
-
-    // Clip/Save button (transforms between edit icon and save icon)
-    private let clipSaveButton: UIButton = {
-        let button = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let image = UIImage(systemName: "film.circle.fill", withConfiguration: config)
-        button.setImage(image, for: .normal)
-        button.tintColor = .white
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
-    }()
-    
-    // NEW: Top-right button container (pill-shaped)
-    private let topRightButtonContainer: UIView = {
-        let view = UIView()
-        view.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        view.layer.cornerRadius = 32 // Half of height for pill shape
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.alpha = 0
-        return view
-    }()
-
-    private let stopSessionButton: UIButton = {
-        let button = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let image = UIImage(systemName: "xmark.circle.fill", withConfiguration: config)
-        button.setImage(image, for: .normal)
-        button.tintColor = .systemRed
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
-    }()
-
-    // NEW: Restart button (restarts countdown)
-    private let restartButton: UIButton = {
-        let button = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let image = UIImage(systemName: "arrow.clockwise.circle.fill", withConfiguration: config)
-        button.setImage(image, for: .normal)
-        button.tintColor = .systemGreen
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
-    }()
-
-    // Cancel button (in clip mode, top left)
-    private let cancelClipButton: UIButton = {
-        let button = UIButton(type: .system)
-        
-        // Pill background (like live recording indicator)
-        button.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        button.layer.cornerRadius = 18  // Half of height for pill shape
-        button.clipsToBounds = true
-        
-        // Text styling
-        button.setTitle("Cancel", for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        button.setTitleColor(.white, for: .normal)
-        
-        // Padding around text
-        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
-        
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.isHidden = true
-        return button
-    }()
+    // MARK: - Hide-controls timer
 
     private var hideControlsTimer: Timer?
 
-    private lazy var captureQueue: DispatchQueue = {
-        return DispatchQueue(label: "com.loopr.capture", qos: .userInteractive, attributes: [])
-    }()
-
-    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-
-    // Constants for handle width
-    private let handleWidth: CGFloat = 20
-    
-    // Always scrub 60 seconds
-    private let scrubDurationSeconds: Int = 60
+    // MARK: - Init
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -605,17 +492,15 @@ class DelayedCameraView: UIView {
         displayImageView.backgroundColor = .clear
         displayImageView.alpha = 0
         displayImageView.isUserInteractionEnabled = false
-        
         addSubview(displayImageView)
+
         addSubview(countdownLabel)
         addSubview(countdownStopButton)
         addSubview(livePauseButton)
         addSubview(successFeedbackView)
         addSubview(cancelClipButton)
-        
         setupControls()
-        
-        addSubview(activityAlertContainer) //must be after setup controls
+        addSubview(activityAlertContainer)
 
         NSLayoutConstraint.activate([
             countdownLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -623,71 +508,66 @@ class DelayedCameraView: UIView {
             countdownLabel.widthAnchor.constraint(equalToConstant: 200),
             countdownLabel.heightAnchor.constraint(equalToConstant: 200),
 
-            // Stop button during countdown - bottom center
             countdownStopButton.centerXAnchor.constraint(equalTo: centerXAnchor),
-            countdownStopButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -40),
+            countdownStopButton.bottomAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -40),
             countdownStopButton.widthAnchor.constraint(equalToConstant: 120),
             countdownStopButton.heightAnchor.constraint(equalToConstant: 120),
 
-            // Live pause button - SAME SIZE AND POSITION as countdown stop button
             livePauseButton.centerXAnchor.constraint(equalTo: centerXAnchor),
-            livePauseButton.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -40),
+            livePauseButton.bottomAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -40),
             livePauseButton.widthAnchor.constraint(equalToConstant: 120),
             livePauseButton.heightAnchor.constraint(equalToConstant: 120),
 
-            // Success feedback - center
             successFeedbackView.centerXAnchor.constraint(equalTo: centerXAnchor),
             successFeedbackView.centerYAnchor.constraint(equalTo: centerYAnchor),
             successFeedbackView.widthAnchor.constraint(equalToConstant: 200),
             successFeedbackView.heightAnchor.constraint(equalToConstant: 200),
 
-            // Cancel button (top left in clip mode)
-            cancelClipButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
-            cancelClipButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
-            
-            // Activity alert - centered
+            cancelClipButton.leadingAnchor.constraint(
+                equalTo: leadingAnchor, constant: 20),
+            cancelClipButton.topAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+
             activityAlertContainer.centerXAnchor.constraint(equalTo: centerXAnchor),
             activityAlertContainer.centerYAnchor.constraint(equalTo: centerYAnchor),
             activityAlertContainer.widthAnchor.constraint(equalToConstant: 340)
         ])
 
-        countdownStopButton.addTarget(self, action: #selector(countdownStopTapped), for: .touchUpInside)
-        livePauseButton.addTarget(self, action: #selector(livePauseTapped), for: .touchUpInside)
+        countdownStopButton.addTarget(self, action: #selector(countdownStopTapped),  for: .touchUpInside)
+        livePauseButton.addTarget(self,     action: #selector(livePauseTapped),       for: .touchUpInside)
 
         NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(orientationDidChange),
-            name: UIDevice.orientationDidChangeNotification,
-            object: nil
-        )
+            self, selector: #selector(orientationDidChange),
+            name: UIDevice.orientationDidChangeNotification, object: nil)
 
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
-        addGestureRecognizer(tapGesture)
+        addGestureRecognizer(
+            UITapGestureRecognizer(target: self, action: #selector(handleTap)))
 
         print("🎬 DelayedCameraView initialized")
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) not implemented")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
         hideControlsTimer?.invalidate()
-        loopTimer?.invalidate()
         recordingDurationTimer?.invalidate()
         activityCheckTimer?.invalidate()
         activityCountdownTimer?.invalidate()
+        tearDownPlayer()
         videoFileBuffer?.cleanup()
     }
+
+    // MARK: - Layout
 
     override func layoutSubviews() {
         super.layoutSubviews()
         displayImageView.frame = bounds
-        previewLayer?.frame = bounds
+        previewLayer?.frame    = bounds
+        playerLayer?.frame     = bounds
         layer.layoutIfNeeded()
-
-        // Update clip handles after layout if in clip mode
         if isClipMode {
             updateClipHandlePositions()
             updatePlayheadPosition()
@@ -696,32 +576,26 @@ class DelayedCameraView: UIView {
         }
     }
 
+    // MARK: - Controls setup
+
     private func setupControls() {
         addSubview(controlsContainer)
         addSubview(recordingIndicator)
-        
-        // NEW: Add top-right button container to main view
         addSubview(topRightButtonContainer)
-        
+
         controlsContainer.addSubview(playPauseButton)
         controlsContainer.addSubview(timelineContainer)
         controlsContainer.addSubview(timeLabel)
         controlsContainer.addSubview(clipSaveButton)
-        
-        // MOVED: Add restart and stop buttons to top-right container instead
+
         topRightButtonContainer.addSubview(restartButton)
         topRightButtonContainer.addSubview(stopSessionButton)
-        
-        // Add scrubber background and playhead FIRST
+
         timelineContainer.addSubview(scrubberBackground)
         timelineContainer.addSubview(scrubberPlayhead)
         scrubberPlayhead.addSubview(scrubberPlayheadKnob)
         timelineContainer.addSubview(scrubberTouchArea)
-        
-        // Add clip background
         timelineContainer.addSubview(clipRegionBackground)
-        
-        // Add trim UI to timeline container
         timelineContainer.addSubview(leftDimView)
         timelineContainer.addSubview(rightDimView)
         timelineContainer.addSubview(topBorder)
@@ -729,118 +603,105 @@ class DelayedCameraView: UIView {
         timelineContainer.addSubview(playheadTouchArea)
         timelineContainer.addSubview(leftTrimHandle)
         timelineContainer.addSubview(rightTrimHandle)
-        
-        // Add playhead, knob, and touch area
         timelineContainer.addSubview(clipPlayhead)
         clipPlayhead.addSubview(clipPlayheadKnob)
-        
-        playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
-        stopSessionButton.addTarget(self, action: #selector(stopSessionTapped), for: .touchUpInside)
-        clipSaveButton.addTarget(self, action: #selector(clipSaveButtonTapped), for: .touchUpInside)
-        restartButton.addTarget(self, action: #selector(restartButtonTapped), for: .touchUpInside)
-        cancelClipButton.addTarget(self, action: #selector(cancelClipTapped), for: .touchUpInside)
-        
-        // Add pan gestures to trim handles
+
+        playPauseButton.addTarget(self,   action: #selector(playPauseTapped),        for: .touchUpInside)
+        stopSessionButton.addTarget(self, action: #selector(stopSessionTapped),      for: .touchUpInside)
+        clipSaveButton.addTarget(self,    action: #selector(clipSaveButtonTapped),   for: .touchUpInside)
+        restartButton.addTarget(self,     action: #selector(restartButtonTapped),    for: .touchUpInside)
+        cancelClipButton.addTarget(self,  action: #selector(cancelClipTapped),       for: .touchUpInside)
+
         let leftPan = UIPanGestureRecognizer(target: self, action: #selector(handleLeftTrimPan(_:)))
         leftTrimHandle.addGestureRecognizer(leftPan)
-        
         let rightPan = UIPanGestureRecognizer(target: self, action: #selector(handleRightTrimPan(_:)))
         rightTrimHandle.addGestureRecognizer(rightPan)
-        
-        // Add pan gesture to playhead touch area
         let playheadPan = UIPanGestureRecognizer(target: self, action: #selector(handlePlayheadPan(_:)))
         playheadTouchArea.addGestureRecognizer(playheadPan)
-        
         let scrubberPan = UIPanGestureRecognizer(target: self, action: #selector(handleScrubberPan(_:)))
         scrubberPan.delegate = self
         timelineContainer.addGestureRecognizer(scrubberPan)
-        
-        // Add tap gesture to timeline for jumping playhead
         let timelineTap = UITapGestureRecognizer(target: self, action: #selector(handleTimelineTap(_:)))
         timelineTap.cancelsTouchesInView = false
         timelineContainer.addGestureRecognizer(timelineTap)
-        
+
         NSLayoutConstraint.activate([
-            // Recording indicator - top center
-            recordingIndicator.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            recordingIndicator.topAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
             recordingIndicator.centerXAnchor.constraint(equalTo: centerXAnchor),
             recordingIndicator.heightAnchor.constraint(equalToConstant: 36),
             recordingIndicator.widthAnchor.constraint(greaterThanOrEqualToConstant: 100),
-            
-            // NEW: Top-right button container
-            topRightButtonContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
-            topRightButtonContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+
+            topRightButtonContainer.topAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            topRightButtonContainer.trailingAnchor.constraint(
+                equalTo: trailingAnchor, constant: -20),
             topRightButtonContainer.heightAnchor.constraint(equalToConstant: 64),
-            topRightButtonContainer.widthAnchor.constraint(equalToConstant: 108), // 44 + 10 spacing + 44 + 10 padding each side
-            
-            // Restart button (inside top-right container)
-            restartButton.leadingAnchor.constraint(equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
+            topRightButtonContainer.widthAnchor.constraint(equalToConstant: 108),
+            restartButton.leadingAnchor.constraint(
+                equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
             restartButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
             restartButton.widthAnchor.constraint(equalToConstant: 44),
             restartButton.heightAnchor.constraint(equalToConstant: 44),
-            
-            // Stop button (inside top-right container)
-            stopSessionButton.trailingAnchor.constraint(equalTo: topRightButtonContainer.trailingAnchor, constant: -10),
+            stopSessionButton.trailingAnchor.constraint(
+                equalTo: topRightButtonContainer.trailingAnchor, constant: -10),
             stopSessionButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
             stopSessionButton.widthAnchor.constraint(equalToConstant: 44),
             stopSessionButton.heightAnchor.constraint(equalToConstant: 44),
-            
-            // Container - floated up from bottom with side padding
-            controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
-            controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-            controlsContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
+
+            controlsContainer.leadingAnchor.constraint(
+                equalTo: leadingAnchor, constant: 20),
+            controlsContainer.trailingAnchor.constraint(
+                equalTo: trailingAnchor, constant: -20),
+            controlsContainer.bottomAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
             controlsContainer.heightAnchor.constraint(equalToConstant: 80),
-            
-            // Play/Pause button
-            playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 20),
+
+            playPauseButton.leadingAnchor.constraint(
+                equalTo: controlsContainer.leadingAnchor, constant: 20),
             playPauseButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             playPauseButton.widthAnchor.constraint(equalToConstant: 44),
             playPauseButton.heightAnchor.constraint(equalToConstant: 44),
-            
-            // Clip/Save button
-            clipSaveButton.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -20),
+
+            clipSaveButton.trailingAnchor.constraint(
+                equalTo: controlsContainer.trailingAnchor, constant: -20),
             clipSaveButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             clipSaveButton.widthAnchor.constraint(equalToConstant: 44),
             clipSaveButton.heightAnchor.constraint(equalToConstant: 44),
-            
-            // Time label
-            timeLabel.trailingAnchor.constraint(equalTo: clipSaveButton.leadingAnchor, constant: -5),
+
+            timeLabel.trailingAnchor.constraint(
+                equalTo: clipSaveButton.leadingAnchor, constant: -5),
             timeLabel.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             timeLabel.widthAnchor.constraint(equalToConstant: 50),
-            
-            // Timeline container (now extends further since restart/stop buttons are removed)
-            timelineContainer.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 20),
-            timelineContainer.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -20),
+
+            timelineContainer.leadingAnchor.constraint(
+                equalTo: playPauseButton.trailingAnchor, constant: 20),
+            timelineContainer.trailingAnchor.constraint(
+                equalTo: timeLabel.leadingAnchor, constant: -20),
             timelineContainer.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             timelineContainer.heightAnchor.constraint(equalToConstant: 44),
 
-            // Scrubber background (purple bar)
             scrubberBackground.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
             scrubberBackground.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
             scrubberBackground.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             scrubberBackground.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
 
-            // Scrubber playhead line (3px wide white line)
             scrubberPlayhead.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             scrubberPlayhead.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             scrubberPlayhead.widthAnchor.constraint(equalToConstant: 3),
-
-            // Scrubber playhead knob (white circle at top)
             scrubberPlayheadKnob.centerXAnchor.constraint(equalTo: scrubberPlayhead.centerXAnchor),
-            scrubberPlayheadKnob.topAnchor.constraint(equalTo: scrubberPlayhead.topAnchor, constant: -6),
+            scrubberPlayheadKnob.topAnchor.constraint(
+                equalTo: scrubberPlayhead.topAnchor, constant: -6),
             scrubberPlayheadKnob.widthAnchor.constraint(equalToConstant: 16),
             scrubberPlayheadKnob.heightAnchor.constraint(equalToConstant: 16),
 
-            // Scrubber touch area (44px wide for easy dragging)
             scrubberTouchArea.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             scrubberTouchArea.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             scrubberTouchArea.widthAnchor.constraint(equalToConstant: 44),
 
-            // Clip region background (purple)
             clipRegionBackground.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             clipRegionBackground.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
 
-            // Dim views
             leftDimView.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
             leftDimView.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             leftDimView.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
@@ -851,7 +712,6 @@ class DelayedCameraView: UIView {
             rightDimView.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             rightDimView.leadingAnchor.constraint(equalTo: rightTrimHandle.trailingAnchor),
 
-            // Borders
             topBorder.leadingAnchor.constraint(equalTo: leftTrimHandle.trailingAnchor),
             topBorder.trailingAnchor.constraint(equalTo: rightTrimHandle.leadingAnchor),
             topBorder.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
@@ -862,7 +722,6 @@ class DelayedCameraView: UIView {
             bottomBorder.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             bottomBorder.heightAnchor.constraint(equalToConstant: 3),
 
-            // Trim handles
             leftTrimHandle.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             leftTrimHandle.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             leftTrimHandle.widthAnchor.constraint(equalToConstant: handleWidth),
@@ -871,242 +730,1172 @@ class DelayedCameraView: UIView {
             rightTrimHandle.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             rightTrimHandle.widthAnchor.constraint(equalToConstant: handleWidth),
 
-            // Playhead line
             clipPlayhead.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             clipPlayhead.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
-
-            // Playhead knob
             clipPlayheadKnob.centerXAnchor.constraint(equalTo: clipPlayhead.centerXAnchor),
-            clipPlayheadKnob.topAnchor.constraint(equalTo: clipPlayhead.topAnchor, constant: -6),
+            clipPlayheadKnob.topAnchor.constraint(
+                equalTo: clipPlayhead.topAnchor, constant: -6),
             clipPlayheadKnob.widthAnchor.constraint(equalToConstant: 16),
             clipPlayheadKnob.heightAnchor.constraint(equalToConstant: 16),
 
-            // Touch area for easier dragging
             playheadTouchArea.centerXAnchor.constraint(equalTo: clipPlayhead.centerXAnchor),
             playheadTouchArea.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             playheadTouchArea.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             playheadTouchArea.widthAnchor.constraint(equalToConstant: 44)
         ])
 
-        // Store handle constraints for dynamic positioning
-        leftHandleConstraint = leftTrimHandle.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: 0)
-        rightHandleConstraint = rightTrimHandle.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor, constant: 0)
-        playheadConstraint = clipPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: 0)
+        leftHandleConstraint  = leftTrimHandle.leadingAnchor.constraint(
+            equalTo: timelineContainer.leadingAnchor)
+        rightHandleConstraint = rightTrimHandle.trailingAnchor.constraint(
+            equalTo: timelineContainer.trailingAnchor)
+        playheadConstraint    = clipPlayhead.leadingAnchor.constraint(
+            equalTo: timelineContainer.leadingAnchor)
         playheadWidthConstraint = clipPlayhead.widthAnchor.constraint(equalToConstant: 3)
+        clipBackgroundLeadingConstraint  = clipRegionBackground.leadingAnchor.constraint(
+            equalTo: leftTrimHandle.trailingAnchor)
+        clipBackgroundTrailingConstraint = clipRegionBackground.trailingAnchor.constraint(
+            equalTo: rightTrimHandle.leadingAnchor)
+        scrubberPlayheadConstraint  = scrubberPlayhead.leadingAnchor.constraint(
+            equalTo: timelineContainer.leadingAnchor)
+        scrubberTouchAreaConstraint = scrubberTouchArea.leadingAnchor.constraint(
+            equalTo: timelineContainer.leadingAnchor, constant: -22)
 
-        clipBackgroundLeadingConstraint = clipRegionBackground.leadingAnchor.constraint(equalTo: leftTrimHandle.trailingAnchor)
-        clipBackgroundTrailingConstraint = clipRegionBackground.trailingAnchor.constraint(equalTo: rightTrimHandle.leadingAnchor)
-
-        leftHandleConstraint?.isActive = true
-        rightHandleConstraint?.isActive = true
-        playheadConstraint?.isActive = true
-        playheadWidthConstraint?.isActive = true
-        clipBackgroundLeadingConstraint?.isActive = true
-        clipBackgroundTrailingConstraint?.isActive = true
-
-        scrubberPlayheadConstraint = scrubberPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: 0)
-        scrubberPlayheadConstraint?.isActive = true
-        // NEW: Add constraint for touch area centered on playhead
-        scrubberTouchAreaConstraint = scrubberTouchArea.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: -22)
-        scrubberTouchAreaConstraint?.isActive = true
+        [leftHandleConstraint, rightHandleConstraint, playheadConstraint,
+         playheadWidthConstraint, clipBackgroundLeadingConstraint,
+         clipBackgroundTrailingConstraint, scrubberPlayheadConstraint,
+         scrubberTouchAreaConstraint].forEach { $0?.isActive = true }
     }
+
+    // MARK: - Tap & controls visibility
 
     @objc private func handleTap() {
         guard isShowingDelayed else { return }
-
         restartActivityCheckTimer()
-        
-        // LIVE mode: Show/hide pause button
         if !isPaused {
-            if livePauseButton.alpha == 0 {
-                showLivePauseButton()
-            } else {
-                hideLivePauseButton()
-            }
+            livePauseButton.alpha == 0 ? showLivePauseButton() : hideLivePauseButton()
         }
     }
 
     private func showLivePauseButton() {
-        UIView.animate(withDuration: 0.3) {
-            self.livePauseButton.alpha = 1
-        }
-
+        UIView.animate(withDuration: 0.3) { self.livePauseButton.alpha = 1 }
         resetHideControlsTimer()
     }
 
     private func hideLivePauseButton() {
-        UIView.animate(withDuration: 0.3) {
-            self.livePauseButton.alpha = 0
-        }
+        UIView.animate(withDuration: 0.3) { self.livePauseButton.alpha = 0 }
     }
 
     private func showControls() {
         UIView.animate(withDuration: 0.3) {
-            self.controlsContainer.alpha = 1
-            self.topRightButtonContainer.alpha = 1  // ADD THIS LINE
+            self.controlsContainer.alpha      = 1
+            self.topRightButtonContainer.alpha = 1
         }
     }
 
     private func hideControls() {
         UIView.animate(withDuration: 0.3) {
-            self.controlsContainer.alpha = 0
-            self.topRightButtonContainer.alpha = 0  // ADD THIS LINE
+            self.controlsContainer.alpha      = 0
+            self.topRightButtonContainer.alpha = 0
         }
     }
 
     private func resetHideControlsTimer() {
         hideControlsTimer?.invalidate()
-        hideControlsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
-            if !self.isPaused {
-                self.hideLivePauseButton()
-            }
+        hideControlsTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) {
+            [weak self] _ in
+            guard let self else { return }
+            if !self.isPaused { self.hideLivePauseButton() }
         }
     }
 
+    // MARK: - Recording indicator
+
     private func startRecordingIndicator() {
-        // Show the indicator with animation
-        UIView.animate(withDuration: 0.3) {
-            self.recordingIndicator.alpha = 1
-        }
-        
-        // Start blinking dot animation
+        UIView.animate(withDuration: 0.3) { self.recordingIndicator.alpha = 1 }
         if let dot = recordingIndicator.viewWithTag(999) {
-            let blink = CABasicAnimation(keyPath: "opacity")
-            blink.fromValue = 1.0
-            blink.toValue = 0.0
-            blink.duration = 0.8
-            blink.repeatCount = .infinity
-            blink.autoreverses = true
-            dot.layer.add(blink, forKey: "blinking")
+            let b = CABasicAnimation(keyPath: "opacity")
+            b.fromValue = 1.0; b.toValue = 0.0; b.duration = 0.8
+            b.repeatCount = .infinity; b.autoreverses = true
+            dot.layer.add(b, forKey: "blinking")
         }
     }
-    
+
     private func updateRecordingDuration() {
-        guard let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel else { return }
-        
-        let elapsed = CACurrentMediaTime() - recordingStartTime
-        let hours = Int(elapsed) / 3600
-        let minutes = (Int(elapsed) % 3600) / 60
-        let seconds = Int(elapsed) % 60
-        
-        durationLabel.text = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+        guard let lbl = recordingIndicator.viewWithTag(996) as? UILabel else { return }
+        let e = CACurrentMediaTime() - recordingStartTime
+        lbl.text = String(format: "%02d:%02d:%02d",
+                          Int(e) / 3600, (Int(e) % 3600) / 60, Int(e) % 60)
     }
 
     private func stopRecordingIndicator() {
-        // Stop the duration timer
-        recordingDurationTimer?.invalidate()
-        recordingDurationTimer = nil
-        
-        // Stop blinking animation
-        if let dot = recordingIndicator.viewWithTag(999) {
-            dot.layer.removeAnimation(forKey: "blinking")
-        }
-        
-        // Hide the indicator
-        UIView.animate(withDuration: 0.3) {
-            self.recordingIndicator.alpha = 0
-        }
+        recordingDurationTimer?.invalidate(); recordingDurationTimer = nil
+        recordingIndicator.viewWithTag(999)?.layer.removeAnimation(forKey: "blinking")
+        UIView.animate(withDuration: 0.3) { self.recordingIndicator.alpha = 0 }
     }
 
     private func showSuccessFeedback() {
         successFeedbackView.alpha = 1
-
-        UIView.animate(withDuration: 0.3, delay: 2.0, options: [], animations: {
-            self.successFeedbackView.alpha = 0
-        })
+        UIView.animate(withDuration: 0.3, delay: 2.0) { self.successFeedbackView.alpha = 0 }
     }
 
-    @objc private func livePauseTapped() {
-        print("⏸️ Live pause tapped")
-        pausePlayback()
-    }
+    // MARK: - Button actions
+
+    @objc private func livePauseTapped()       { pausePlayback() }
+    @objc private func stopSessionTapped()     { stopSession() }
+    @objc private func countdownStopTapped()   { stopSession() }
+    @objc private func restartButtonTapped()   { restartCountdown() }
 
     @objc private func playPauseTapped() {
-        if isLooping {
-            stopLoop()
-        } else {
-            startLoop()
-        }
-    }
-
-    @objc private func stopSessionTapped() {
-        print("🛑 Stop button tapped from controls")
-        stopSession()
-    }
-
-    @objc private func countdownStopTapped() {
-        print("🛑 Stop button tapped during countdown")
-        stopSession()
-    }
-
-    @objc private func restartButtonTapped() {
-        print("🔄 Restart button tapped - restarting countdown")
-        restartCountdown()
+        if isLooping { stopLoop() } else { startLoop() }
     }
 
     @objc private func clipSaveButtonTapped() {
         if isClipMode {
-            // In clip mode: Save button
-            print("💾 Save to Album tapped")
             saveClipToPhotos()
         } else {
-            // In normal mode: Clip button
-            print("✏️ Edit/Clip button tapped")
             guard isPaused else { return }
-            if isLooping {
-                stopLoop()
-            }
+            if isLooping { stopLoop() }
             enterClipMode()
         }
     }
 
-    private func saveClipToPhotos() {
-        print("📸 Saving clip to Photos...")
+    // MARK: - AVPlayer setup / teardown
 
-        // Check current authorization status first
-        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+    /// Install the player (call once after pauseRecording returns a composition).
+    private func setupPlayer(with item: AVPlayerItem, composition: AVMutableComposition) {
+        tearDownPlayer()
 
-        if status == .denied || status == .restricted {
-            // Already denied — show actionable alert immediately
-            showPhotosPermissionAlert()
+        let p = AVPlayer(playerItem: item)
+        p.actionAtItemEnd = .none   // we handle looping manually
+        self.player = p
+
+        let pl = AVPlayerLayer(player: p)
+        pl.frame       = bounds
+        pl.videoGravity = .resizeAspectFill
+        // Insert above displayImageView but below all controls.
+        if let dlIdx = layer.sublayers?.firstIndex(where: { $0 === displayImageView.layer }) {
+            layer.insertSublayer(pl, at: UInt32(dlIdx + 1))
+        } else {
+            layer.insertSublayer(pl, at: 0)
+        }
+        self.playerLayer = pl
+
+        // Rotate / mirror the player layer to match capture orientation.
+        applyPlayerLayerTransform()
+
+        // Observe playback time to keep scrubber in sync during play.
+        let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let interval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        playerTimeObserver = p.addPeriodicTimeObserver(
+            forInterval: interval, queue: .main) { [weak self] time in
+            self?.playerDidAdvance(to: time, duration: composition.duration)
+        }
+
+        // Loop: when item reaches end, seek back to start and keep playing.
+        playerLoopObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main) { [weak self] _ in
+            guard let self, self.isLooping else { return }
+            self.player?.seek(to: .zero,
+                              toleranceBefore: .zero,
+                              toleranceAfter:  .zero) { [weak self] _ in
+                self?.player?.play()
+            }
+        }
+
+        print("✅ AVPlayer ready")
+    }
+
+    private func tearDownPlayer() {
+        if let obs = playerTimeObserver {
+            player?.removeTimeObserver(obs)
+            playerTimeObserver = nil
+        }
+        if let obs = playerLoopObserver {
+            NotificationCenter.default.removeObserver(obs)
+            playerLoopObserver = nil
+        }
+        player?.pause()
+        player = nil
+        playerLayer?.removeFromSuperlayer()
+        playerLayer = nil
+        isSeeking       = false
+        pendingScrubIndex = nil
+    }
+
+    /// Called by the periodic time observer during playback to advance the
+    /// scrubber UI and the scrubberPosition index.
+    private func playerDidAdvance(to time: CMTime, duration: CMTime) {
+        guard isLooping, let buf = videoFileBuffer else { return }
+
+        // Convert composition time → frame index.
+        let ts = buf.getFrameTimestamps()
+        guard !ts.isEmpty else { return }
+
+        let rawTime = CMTimeAdd(time, buf.pausedCompositionStartTime)
+        // Binary search for the closest timestamp.
+        var lo = 0, hi = ts.count - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if CMTimeCompare(ts[mid], rawTime) <= 0 { lo = mid } else { hi = mid - 1 }
+        }
+
+        let frameIdx = lo
+        if isClipMode {
+            clipPlayheadPosition = min(max(frameIdx, clipStartIndex), clipEndIndex)
+            updatePlayheadPosition()
+            updateTimeLabel()
+        } else {
+            scrubberPosition = frameIdx
+            updateScrubberPlayheadPosition()
+            let actualFPS   = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+            let oldest      = oldestAllowedIndex()
+            let secs        = Float(frameIdx - oldest) / Float(actualFPS)
+            timeLabel.text  = String(format: "%05.2f", secs)
+        }
+    }
+
+    // MARK: - Seek helper (scrub + clip playhead)
+
+    /// Seek the player to the given frame index.
+    /// Calls are coalesced: if a seek is already in flight the new index is
+    /// stored as `pendingScrubIndex` and fired when the current seek finishes.
+    private func seekPlayer(toFrameIndex index: Int) {
+        guard let buf = videoFileBuffer,
+              let compositionTime = buf.compositionTime(forFrameIndex: index) else { return }
+
+        if isSeeking {
+            pendingScrubIndex = index
             return
         }
 
-        let loadingView = createLoadingView(text: "Saving to Album...")
-        addSubview(loadingView)
+        isSeeking = true
+        // Tight tolerance on both sides → nearest decoded frame.
+        let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let half = CMTime(value: 1, timescale: CMTimeScale(fps * 2))
+        player?.seek(to: compositionTime,
+                     toleranceBefore: half,
+                     toleranceAfter:  half) { [weak self] _ in
+            guard let self else { return }
+            self.isSeeking = false
+            if let next = self.pendingScrubIndex {
+                self.pendingScrubIndex = nil
+                self.seekPlayer(toFrameIndex: next)
+            }
+        }
+    }
+
+    // MARK: - Loop playback
+
+    private func startLoop() {
+        guard let buf = videoFileBuffer,
+              let comp = buf.pausedComposition else { return }
+
+        isLooping = true
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        playPauseButton.setImage(
+            UIImage(systemName: "pause.fill", withConfiguration: cfg), for: .normal)
+
+        // If player doesn't exist yet (first play after pause), create it.
+        if player == nil {
+            let item = AVPlayerItem(asset: comp)
+            setupPlayer(with: item, composition: comp)
+        }
+
+        // Seek to current scrubber / clip position before starting.
+        let startIndex = isClipMode ? clipPlayheadPosition : scrubberPosition
+        guard let compositionTime = buf.compositionTime(forFrameIndex: startIndex) else {
+            player?.play()
+            return
+        }
+
+        let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let half = CMTime(value: 1, timescale: CMTimeScale(fps * 2))
+        player?.seek(to: compositionTime,
+                     toleranceBefore: half,
+                     toleranceAfter:  half) { [weak self] _ in
+            guard let self, self.isLooping else { return }
+            self.player?.play()
+        }
+
+        // Show player layer, hide UIImageView.
+        playerLayer?.isHidden  = false
+        displayImageView.alpha = 0
+    }
+
+    private func stopLoop() {
+        isLooping = false
+        player?.pause()
+
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        playPauseButton.setImage(
+            UIImage(systemName: "play.circle.fill", withConfiguration: cfg), for: .normal)
+
+        // Snap the still frame for the current position onto displayImageView,
+        // then hide the player layer so scrubbing shows UIImageView frames.
+        let idx = isClipMode ? clipPlayheadPosition : scrubberPosition
+        seekPlayer(toFrameIndex: idx)  // keep player in sync for next play
+        showStillFrameForCurrentPosition()
+    }
+
+    /// Capture a single video frame at the current scrub position and show it
+    /// on displayImageView (used when not playing).
+    private func showStillFrameForCurrentPosition() {
+        // The player layer already shows the correct frame while paused; we
+        // just make sure displayImageView is hidden so the player shows through.
+        // When actually scrubbing we use seekPlayer which updates the player
+        // layer live — no UIImageView decode needed.
+        playerLayer?.isHidden  = false
+        displayImageView.alpha = 0
+    }
+
+    // MARK: - Scrubber pan (non-clip mode)
+
+    @objc private func handleScrubberPan(_ gesture: UIPanGestureRecognizer) {
+        if gesture.state == .began {
+            if isLooping { stopLoop() }
+        }
+
+        let location = gesture.location(in: timelineContainer)
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+
+        guard let buf = videoFileBuffer else { return }
+        let totalFrames = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint   = totalFrames - requiredFrames
+        let oldest       = oldestAllowedIndex()
+        let scrubRange   = pausePoint - oldest
+        let timelineWidth = timelineContainer.bounds.width
+        guard scrubRange > 0, timelineWidth > 0 else { return }
+
+        let clampedX        = max(0, min(location.x, timelineWidth))
+        let normalizedPos   = clampedX / timelineWidth
+        let frameIndex      = oldest + Int(normalizedPos * CGFloat(scrubRange))
+        scrubberPosition    = max(oldest, min(frameIndex, pausePoint))
+
+        updateScrubberPlayheadPosition()
+
+        let secs = Float(scrubberPosition - oldest) / Float(actualFPS)
+        timeLabel.text = String(format: "%05.2f", secs)
+
+        // Seek the player (coalesced — never stacks).
+        seekPlayer(toFrameIndex: scrubberPosition)
+    }
+
+    private func updateScrubberPlayheadPosition() {
+        guard let buf = videoFileBuffer else { return }
+        let actualFPS     = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames   = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint    = totalFrames - requiredFrames
+        let oldest        = oldestAllowedIndex()
+        let scrubRange    = pausePoint - oldest
+        guard scrubRange > 0 else { return }
+
+        let timelineWidth = timelineContainer.bounds.width
+        guard timelineWidth > 0 else { return }
+
+        let clamped   = max(oldest, min(scrubberPosition, pausePoint))
+        let normalized = CGFloat(clamped - oldest) / CGFloat(scrubRange)
+        let playheadX  = normalized * timelineWidth
+
+        scrubberPlayheadConstraint?.constant = playheadX
+        let touchX = max(0, min(playheadX - 22, timelineWidth - 44))
+        scrubberTouchAreaConstraint?.constant = touchX
+        timelineContainer.layoutIfNeeded()
+    }
+
+    // MARK: - Pause playback (live → paused)
+
+    private func pausePlayback() {
+        guard !isPaused, isShowingDelayed else { return }
+        isPaused = true
+        displayTimer?.invalidate(); displayTimer = nil
+
+        stopRecordingIndicator()
+        hideLivePauseButton()
+
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        videoFileBuffer?.pauseRecording { [weak self] item, composition in
+            guard let self else { return }
+            guard let item, let composition else {
+                print("❌ pauseRecording returned nil")
+                return
+            }
+
+            let totalFrames   = self.videoFileBuffer?.getTimestampCount() ?? 0
+            let requiredFrames = self.delaySeconds * actualFPS
+            self.scrubberPosition = max(1, totalFrames - requiredFrames)
+
+            self.setupPlayer(with: item, composition: composition)
+            self.seekPlayer(toFrameIndex: self.scrubberPosition)
+
+            self.updateScrubberPlayheadPosition()
+            self.showControls()
+            self.playerLayer?.isHidden = false
+            self.displayImageView.alpha = 0
+
+            let oldest = self.oldestAllowedIndex()
+            let secs   = Float(self.scrubberPosition - oldest) / Float(actualFPS)
+            self.timeLabel.text = String(format: "%05.2f", secs)
+
+            print("⏸ Paused — scrubberPosition: \(self.scrubberPosition), " +
+                  "totalFrames: \(totalFrames)")
+        }
+    }
+
+    // MARK: - Oldest allowed index helper
+
+    private func oldestAllowedIndex() -> Int {
+        guard let buf = videoFileBuffer else { return 0 }
+        let actualFPS  = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return 0 }
+        let pausePoint  = totalFrames - requiredFrames
+        let scrubBack   = scrubDurationSeconds * actualFPS
+        return max(1, pausePoint - scrubBack)
+    }
+
+    // MARK: - Orientation
+
+    @objc private func orientationDidChange() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.forceOrientationUpdate()
+            self?.applyPlayerLayerTransform()
+        }
+    }
+
+    private func forceOrientationUpdate() {
+        guard let conn = previewLayer?.connection else { return }
+        let ori = UIApplication.shared.windows.first?.windowScene?.interfaceOrientation
+        if isFrontCamera {
+            switch ori {
+            case .landscapeLeft:      conn.videoRotationAngle = 0
+            case .landscapeRight:     conn.videoRotationAngle = 180
+            case .portrait:           conn.videoRotationAngle = 90
+            case .portraitUpsideDown: conn.videoRotationAngle = 270
+            default:                  conn.videoRotationAngle = 0
+            }
+        } else {
+            switch ori {
+            case .landscapeLeft:      conn.videoRotationAngle = 180
+            case .landscapeRight:     conn.videoRotationAngle = 0
+            case .portrait:           conn.videoRotationAngle = 90
+            case .portraitUpsideDown: conn.videoRotationAngle = 270
+            default:                  conn.videoRotationAngle = 0
+            }
+        }
+    }
+
+    /// Match the AVPlayerLayer's transform to the current capture orientation
+    /// so the paused / playing video appears correctly oriented.
+    private func applyPlayerLayerTransform() {
+        guard let pl = playerLayer else { return }
+        let angle = previewLayer?.connection?.videoRotationAngle ?? 0
+        let radians = angle * .pi / 180.0
+        var t = CGAffineTransform(rotationAngle: CGFloat(radians))
+        if isFrontCamera { t = t.scaledBy(x: -1, y: 1) }
+        pl.setAffineTransform(t)
+        pl.frame = bounds
+    }
+
+    // MARK: - Session setup
+
+    func startSession(delaySeconds: Int, useFrontCamera: Bool) {
+        self.delaySeconds  = delaySeconds
+        self.isActive      = true
+        self.isFrontCamera = useFrontCamera
+        self.isPaused      = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.setupCamera(useFrontCamera: useFrontCamera)
+        }
+    }
+
+    private func setupCamera(useFrontCamera: Bool) {
+        captureSession = AVCaptureSession()
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.captureSession.beginConfiguration()
+            self.captureSession.sessionPreset = .high
+
+            let pos: AVCaptureDevice.Position = useFrontCamera ? .front : .back
+            guard let camera = AVCaptureDevice.default(
+                .builtInWideAngleCamera, for: .video, position: pos) else {
+                print("❌ No camera found")
+                self.captureSession.commitConfiguration()
+                return
+            }
+            self.currentDevice = camera
+
+            let actualFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
+
+            do {
+                try camera.lockForConfiguration()
+                var fpsSet = false
+                for r in camera.activeFormat.videoSupportedFrameRateRanges {
+                    if Double(actualFPS) >= r.minFrameRate &&
+                       Double(actualFPS) <= r.maxFrameRate {
+                        camera.activeVideoMinFrameDuration =
+                            CMTime(value: 1, timescale: CMTimeScale(actualFPS))
+                        camera.activeVideoMaxFrameDuration =
+                            CMTime(value: 1, timescale: CMTimeScale(actualFPS))
+                        fpsSet = true; break
+                    }
+                }
+                if !fpsSet {
+                    camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+                    camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+                    Settings.shared.setFPS(30, isFrontCamera: useFrontCamera)
+                }
+                camera.unlockForConfiguration()
+            } catch { print("❌ Camera config error: \(error)") }
+
+            let maxDuration = 300 + self.delaySeconds + 10
+            self.videoFileBuffer = VideoFileBuffer(
+                maxDurationSeconds: maxDuration,
+                delaySeconds:       self.delaySeconds,
+                fps:                actualFPS,
+                writeQueue:         self.captureQueue,
+                ciContext:          self.ciContext)
+
+            do {
+                let input = try AVCaptureDeviceInput(device: camera)
+                if self.captureSession.canAddInput(input) {
+                    self.captureSession.addInput(input)
+                } else {
+                    print("❌ Cannot add input")
+                    self.captureSession.commitConfiguration()
+                    return
+                }
+            } catch {
+                print("❌ Input error: \(error)")
+                self.captureSession.commitConfiguration()
+                return
+            }
+
+            let output = AVCaptureVideoDataOutput()
+            output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String:
+                                    kCVPixelFormatType_32BGRA]
+            output.alwaysDiscardsLateVideoFrames = false
+            output.setSampleBufferDelegate(self, queue: self.captureQueue)
+            if self.captureSession.canAddOutput(output) {
+                self.captureSession.addOutput(output)
+            }
+            self.videoDataOutput = output
+            self.captureSession.commitConfiguration()
+
+            // Zoom
+            do {
+                try camera.lockForConfiguration()
+                let saved = Settings.shared.currentZoomFactor(isFrontCamera: useFrontCamera)
+                let clamped = min(max(saved, camera.minAvailableVideoZoomFactor),
+                                  min(camera.activeFormat.videoMaxZoomFactor, 10.0))
+                camera.videoZoomFactor = clamped
+                camera.unlockForConfiguration()
+            } catch {}
+
+            let videoWidth  = 1920, videoHeight = 1080
+            let videoSettings: [String: Any] = [
+                AVVideoCodecKey:  AVVideoCodecType.h264,
+                AVVideoWidthKey:  videoWidth,
+                AVVideoHeightKey: videoHeight,
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey:       videoWidth * videoHeight * 11,
+                    AVVideoProfileLevelKey:         AVVideoProfileLevelH264HighAutoLevel,
+                    AVVideoExpectedSourceFrameRateKey: actualFPS,
+                    AVVideoMaxKeyFrameIntervalKey:  actualFPS
+                ]
+            ]
+
+            try? self.videoFileBuffer?.startWriting(
+                videoSettings: videoSettings, isInitialStart: true)
+
+            DispatchQueue.main.async {
+                let preview = AVCaptureVideoPreviewLayer(session: self.captureSession)
+                preview.videoGravity = .resizeAspectFill
+                preview.frame        = self.bounds
+                self.layer.insertSublayer(preview, at: 0)
+                self.previewLayer = preview
+                self.forceOrientationUpdate()
+
+                // Bring UI layers to front.
+                for v in [self.displayImageView!,
+                          self.countdownLabel, self.countdownStopButton,
+                          self.livePauseButton, self.successFeedbackView,
+                          self.cancelClipButton, self.recordingIndicator,
+                          self.controlsContainer, self.topRightButtonContainer] as [UIView] {
+                    self.bringSubviewToFront(v)
+                }
+            }
+
+            self.captureQueue.async {
+                if !self.captureSession.isRunning { self.captureSession.startRunning() }
+                DispatchQueue.main.async { self.startCountdown() }
+            }
+        }
+    }
+
+    // MARK: - Countdown
+
+    private func startCountdown() {
+        var countdown = delaySeconds
+        countdownLabel.text  = "\(countdown)"
+        countdownLabel.alpha  = 1
+        countdownStopButton.alpha = 1
+
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self, self.isActive else { timer.invalidate(); return }
+            countdown -= 1
+            if countdown <= 0 {
+                timer.invalidate()
+                self.countdownLabel.alpha     = 0
+                self.countdownStopButton.alpha = 0
+                self.startDelayedDisplay()
+            } else {
+                self.countdownLabel.text = "\(countdown)"
+            }
+        }
+    }
+
+    private func startDelayedDisplay() {
+        isShowingDelayed = true
+
+        // Show recording indicator.
+        if let lbl = recordingIndicator.viewWithTag(997) as? UILabel {
+            lbl.text = "-\(delaySeconds)s"
+        }
+        recordingStartTime = CACurrentMediaTime()
+        recordingDurationTimer = Timer.scheduledTimer(
+            withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updateRecordingDuration()
+        }
+        startRecordingIndicator()
+
+        UIView.animate(withDuration: 0.3) {
+            self.displayImageView.alpha = 1
+            self.previewLayer?.opacity  = 0
+        }
+
+        displayImageView.alpha = 1
+
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let delayFrames    = delaySeconds * actualFPS
+        let frameInterval  = 1.0 / Double(actualFPS)
+
+        displayTimer = Timer.scheduledTimer(
+            withTimeInterval: frameInterval, repeats: true) { [weak self] _ in
+            guard let self, let buf = self.videoFileBuffer else { return }
+            let total  = buf.getCurrentFrameCount()
+            let target = total - delayFrames
+            guard target >= 0 else { return }
+            if let img = buf.getRecentFrame(at: target) {
+                self.displayFrame(img)
+            }
+        }
+        RunLoop.main.add(displayTimer!, forMode: .common)
+        showLivePauseButton()
+        startActivityCheckTimer()
+    }
+
+    // MARK: - Stop session
+
+    func stopSession() {
+        guard isActive else { return }
+        isActive         = false
+        isShowingDelayed = false
+        isPaused         = false
+
+        displayTimer?.invalidate(); displayTimer = nil
+        stopRecordingIndicator()
+        hideLivePauseButton()
+        hideControls()
+        tearDownPlayer()
+
+        if isLooping { isLooping = false }
+        if isClipMode { exitClipModeClean() }
+
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.captureSession?.stopRunning()
+            let old = self.videoFileBuffer
+            self.videoFileBuffer = nil
+            old?.cleanup()
+            DispatchQueue.main.async {
+                self.previewLayer?.removeFromSuperlayer()
+                self.previewLayer = nil
+                self.displayImageView.alpha = 0
+                self.onSessionStopped?()
+            }
+        }
+    }
+
+    // MARK: - Restart
+
+    private func restartCountdown() {
+        if isLooping   { stopLoop()        }
+        if isClipMode  { exitClipModeClean() }
+        hideControls()
+
+        isPaused         = false
+        isShowingDelayed = false
+        tearDownPlayer()
+
+        let oldBuffer    = videoFileBuffer
+        videoFileBuffer  = nil
+        captureQueue.sync { oldBuffer?.cleanup() }
+        print("♻️ Old VideoFileBuffer drained")
+
+        let actualFPS   = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let maxDuration = 300 + delaySeconds + 10
+        videoFileBuffer = VideoFileBuffer(
+            maxDurationSeconds: maxDuration,
+            delaySeconds:       delaySeconds,
+            fps:                actualFPS,
+            writeQueue:         captureQueue,
+            ciContext:          ciContext)
+
+        videoDataOutput?.setSampleBufferDelegate(self, queue: captureQueue)
+
+        let w = 1920, h = 1080
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey:  AVVideoCodecType.h264,
+            AVVideoWidthKey:  w,
+            AVVideoHeightKey: h,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey:          w * h * 11,
+                AVVideoProfileLevelKey:            AVVideoProfileLevelH264HighAutoLevel,
+                AVVideoExpectedSourceFrameRateKey: actualFPS,
+                AVVideoMaxKeyFrameIntervalKey:     actualFPS
+            ]
+        ]
+        try? videoFileBuffer?.startWriting(videoSettings: videoSettings, isInitialStart: true)
+
+        UIView.animate(withDuration: 0.3) {
+            self.previewLayer?.opacity  = 1
+            self.displayImageView.alpha = 0
+        }
+        startCountdown()
+    }
+
+    // MARK: - Display frame (live delay)
+
+    private func displayFrame(_ rawImage: UIImage) {
+        guard let cg = rawImage.cgImage else {
+            DispatchQueue.main.async { self.displayImageView.image = rawImage }
+            return
+        }
+
+        let angle = previewLayer?.connection?.videoRotationAngle ?? 0
+        let ori: UIImage.Orientation
+        switch angle {
+        case 90:  ori = .right
+        case 180: ori = .down
+        case 270: ori = .left
+        default:  ori = .up
+        }
+        let img = UIImage(cgImage: cg, scale: 1.0, orientation: ori)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.displayImageView.image     = img
+            self.displayImageView.transform = self.isFrontCamera
+                ? CGAffineTransform(scaleX: -1, y: 1) : .identity
+        }
+    }
+
+    // MARK: - Clip mode
+
+    private func enterClipMode() {
+        guard let buf = videoFileBuffer else { return }
+
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint  = totalFrames - requiredFrames
+        let oldest      = oldestAllowedIndex()
+        guard pausePoint > oldest else { return }
+
+        isClipMode           = true
+        clipStartIndex       = oldest
+        clipEndIndex         = pausePoint
+        clipPlayheadPosition = scrubberPosition
+
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        clipSaveButton.setImage(
+            UIImage(systemName: "arrow.down.to.line.circle.fill", withConfiguration: cfg),
+            for: .normal)
+        clipSaveButton.tintColor = .white
+
+        UIView.animate(withDuration: 0.3) {
+            self.scrubberBackground.alpha   = 0
+            self.scrubberPlayhead.alpha     = 0
+            self.clipRegionBackground.isHidden = false
+            self.leftDimView.isHidden          = false
+            self.rightDimView.isHidden         = false
+            self.topBorder.isHidden            = false
+            self.bottomBorder.isHidden         = false
+            self.leftTrimHandle.isHidden       = false
+            self.rightTrimHandle.isHidden      = false
+            self.clipPlayhead.isHidden         = false
+            self.playheadTouchArea.isHidden    = false
+            self.cancelClipButton.isHidden     = false
+        }
+
+        updateClipHandlePositions()
+        updatePlayheadPosition()
+        updateTimeLabel()
+    }
+
+    @objc private func cancelClipTapped() {
+        if isLooping { stopLoop() }
+        exitClipMode()
+    }
+
+    private func exitClipMode() {
+        scrubberPosition = clipPlayheadPosition
+        exitClipModeClean()
+        seekPlayer(toFrameIndex: scrubberPosition)
+        updateScrubberPlayheadPosition()
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let oldest    = oldestAllowedIndex()
+        let secs      = Float(scrubberPosition - oldest) / Float(actualFPS)
+        timeLabel.text = String(format: "%05.2f", secs)
+    }
+
+    private func exitClipModeClean() {
+        isClipMode = false
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        clipSaveButton.setImage(
+            UIImage(systemName: "film.circle.fill", withConfiguration: cfg), for: .normal)
+        clipSaveButton.tintColor = .white
+
+        UIView.animate(withDuration: 0.3) {
+            self.leftDimView.isHidden          = true
+            self.rightDimView.isHidden         = true
+            self.topBorder.isHidden            = true
+            self.bottomBorder.isHidden         = true
+            self.leftTrimHandle.isHidden       = true
+            self.rightTrimHandle.isHidden      = true
+            self.clipPlayhead.isHidden         = true
+            self.playheadTouchArea.isHidden    = true
+            self.clipRegionBackground.isHidden = true
+            self.scrubberBackground.alpha      = 1
+            self.scrubberPlayhead.alpha        = 1
+            self.cancelClipButton.isHidden     = true
+        }
+    }
+
+    // MARK: - Clip handle positions
+
+    private func updateClipHandlePositions() {
+        guard isClipMode, let buf = videoFileBuffer else { return }
+
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint    = totalFrames - requiredFrames
+        let oldest        = oldestAllowedIndex()
+        let totalRange    = pausePoint - oldest
+        guard totalRange > 0 else { return }
+
+        let w = timelineContainer.bounds.width
+        guard w > 0 else { return }
+
+        let leftNorm  = CGFloat(clipStartIndex - oldest) / CGFloat(totalRange)
+        let rightNorm = CGFloat(clipEndIndex   - oldest) / CGFloat(totalRange)
+
+        leftHandleConstraint?.constant  = leftNorm * w
+        rightHandleConstraint?.constant = -(w - rightNorm * w)
+        timelineContainer.layoutIfNeeded()
+    }
+
+    private func updatePlayheadPosition() {
+        guard isClipMode else { return }
+
+        let w = timelineContainer.bounds.width
+        guard w > 0, clipEndIndex > clipStartIndex else { return }
+
+        guard let buf = videoFileBuffer else { return }
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint  = totalFrames - requiredFrames
+        let oldest      = oldestAllowedIndex()
+        let totalRange  = pausePoint - oldest
+        guard totalRange > 0 else { return }
+
+        let leftNorm  = CGFloat(clipStartIndex - oldest) / CGFloat(totalRange)
+        let rightNorm = CGFloat(clipEndIndex   - oldest) / CGFloat(totalRange)
+        let leftEdge  = leftNorm  * w + handleWidth
+        let rightEdge = rightNorm * w - handleWidth
+        let clipWidth = rightEdge - leftEdge
+        guard clipWidth > 0 else { return }
+
+        let normPH = CGFloat(clipPlayheadPosition - clipStartIndex) /
+                     CGFloat(clipEndIndex - clipStartIndex)
+        let phX    = leftEdge + normPH * clipWidth
+
+        playheadConstraint?.constant = phX
+        let touchX = max(0, min(phX - 22, w - 44))
+        playheadTouchArea.frame.origin.x = touchX
+        timelineContainer.layoutIfNeeded()
+    }
+
+    private func updateTimeLabel() {
+        guard isClipMode else { return }
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let t = Float(clipPlayheadPosition - clipStartIndex) / Float(actualFPS)
+        timeLabel.text = String(format: "%05.2f", t)
+    }
+
+    // MARK: - Trim handle gestures
+
+    @objc private func handleLeftTrimPan(_ gesture: UIPanGestureRecognizer) {
+        let tr = gesture.translation(in: timelineContainer)
+
+        if gesture.state == .began {
+            if isLooping { stopLoop() }
+            isDraggingHandle   = true
+            initialLeftPosition = leftHandleConstraint?.constant ?? 0
+            initialClipStartIndex = clipStartIndex
+            clipPlayhead.alpha     = 0
+            playheadTouchArea.alpha = 0
+        }
+
+        guard let buf = videoFileBuffer else { return }
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint  = totalFrames - requiredFrames
+        let oldest      = oldestAllowedIndex()
+        let scrubRange  = pausePoint - oldest
+        let w           = timelineContainer.bounds.width
+        guard w > 0 else { return }
+
+        let newLeft = initialLeftPosition + tr.x
+        let norm    = max(0, min(newLeft / w, 1))
+        let newStart = oldest + Int(norm * CGFloat(scrubRange))
+
+        clipStartIndex = max(oldest, min(newStart, clipEndIndex - actualFPS))
+        clipPlayheadPosition = clipStartIndex
+        updateClipHandlePositions()
+        updatePlayheadPosition()
+        updateTimeLabel()
+
+        if gesture.state == .changed {
+            let now = CACurrentMediaTime()
+            if now - lastUpdateTime > 0.05 {
+                lastUpdateTime = now
+                seekPlayer(toFrameIndex: clipPlayheadPosition)
+            }
+        }
+
+        if gesture.state == .ended || gesture.state == .cancelled {
+            isDraggingHandle = false
+            seekPlayer(toFrameIndex: clipPlayheadPosition)
+            UIView.animate(withDuration: 0.3) {
+                self.clipPlayhead.alpha     = 1
+                self.playheadTouchArea.alpha = 1
+            }
+        }
+    }
+
+    @objc private func handleRightTrimPan(_ gesture: UIPanGestureRecognizer) {
+        let tr = gesture.translation(in: timelineContainer)
+
+        if gesture.state == .began {
+            if isLooping { stopLoop() }
+            isDraggingHandle    = true
+            initialRightPosition = rightHandleConstraint?.constant ?? 0
+            initialClipEndIndex  = clipEndIndex
+            clipPlayhead.alpha      = 0
+            playheadTouchArea.alpha  = 0
+        }
+
+        guard let buf = videoFileBuffer else { return }
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint  = totalFrames - requiredFrames
+        let oldest      = oldestAllowedIndex()
+        let scrubRange  = pausePoint - oldest
+        let w           = timelineContainer.bounds.width
+        guard w > 0 else { return }
+
+        let currentFromLeft = w + (initialRightPosition) + tr.x
+        let norm = max(0, min(currentFromLeft / w, 1))
+        let newEnd = oldest + Int(norm * CGFloat(scrubRange))
+
+        clipEndIndex = max(clipStartIndex + actualFPS, min(newEnd, pausePoint))
+        clipPlayheadPosition = clipEndIndex
+        updateClipHandlePositions()
+        updatePlayheadPosition()
+        updateTimeLabel()
+
+        if gesture.state == .changed {
+            let now = CACurrentMediaTime()
+            if now - lastUpdateTime > 0.05 {
+                lastUpdateTime = now
+                seekPlayer(toFrameIndex: clipPlayheadPosition)
+            }
+        }
+
+        if gesture.state == .ended || gesture.state == .cancelled {
+            isDraggingHandle = false
+            seekPlayer(toFrameIndex: clipPlayheadPosition)
+            UIView.animate(withDuration: 0.3) {
+                self.clipPlayhead.alpha     = 1
+                self.playheadTouchArea.alpha = 1
+            }
+        }
+    }
+
+    @objc private func handlePlayheadPan(_ gesture: UIPanGestureRecognizer) {
+        let tr = gesture.translation(in: timelineContainer)
+
+        if gesture.state == .began {
+            if isLooping { stopLoop() }
+            initialPlayheadPosition      = playheadConstraint?.constant ?? 0
+            initialClipPlayheadPosition  = clipPlayheadPosition
+        }
+
+        guard clipEndIndex > clipStartIndex else { return }
+        let w = timelineContainer.bounds.width
+        guard w > 0 else { return }
+
+        guard let buf = videoFileBuffer else { return }
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint  = totalFrames - requiredFrames
+        let oldest      = oldestAllowedIndex()
+        let totalRange  = pausePoint - oldest
+        guard totalRange > 0 else { return }
+
+        let leftNorm  = CGFloat(clipStartIndex - oldest) / CGFloat(totalRange)
+        let rightNorm = CGFloat(clipEndIndex   - oldest) / CGFloat(totalRange)
+        let leftEdge  = leftNorm  * w + handleWidth
+        let rightEdge = rightNorm * w - handleWidth
+        let clipWidth = rightEdge - leftEdge
+        guard clipWidth > 0 else { return }
+
+        let newX      = max(leftEdge, min(initialPlayheadPosition + tr.x, rightEdge))
+        let normPH    = (newX - leftEdge) / clipWidth
+        let newFrame  = clipStartIndex + Int(normPH * CGFloat(clipEndIndex - clipStartIndex))
+        clipPlayheadPosition = max(clipStartIndex, min(newFrame, clipEndIndex))
+
+        updatePlayheadPosition()
+        updateTimeLabel()
+        seekPlayer(toFrameIndex: clipPlayheadPosition)
+    }
+
+    @objc private func handleTimelineTap(_ gesture: UITapGestureRecognizer) {
+        guard isClipMode else { return }
+        let loc = gesture.location(in: timelineContainer)
+        let w   = timelineContainer.bounds.width
+        guard w > 0, clipEndIndex > clipStartIndex else { return }
+
+        guard let buf = videoFileBuffer else { return }
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * actualFPS
+        guard totalFrames > requiredFrames else { return }
+
+        let pausePoint  = totalFrames - requiredFrames
+        let oldest      = oldestAllowedIndex()
+        let totalRange  = pausePoint - oldest
+        guard totalRange > 0 else { return }
+
+        let leftNorm  = CGFloat(clipStartIndex - oldest) / CGFloat(totalRange)
+        let rightNorm = CGFloat(clipEndIndex   - oldest) / CGFloat(totalRange)
+        let leftEdge  = leftNorm  * w + handleWidth
+        let rightEdge = rightNorm * w - handleWidth
+        guard loc.x >= leftEdge && loc.x <= rightEdge else { return }
+
+        let clipWidth = rightEdge - leftEdge
+        let normPH    = (loc.x - leftEdge) / clipWidth
+        let newFrame  = clipStartIndex + Int(normPH * CGFloat(clipEndIndex - clipStartIndex))
+        clipPlayheadPosition = max(clipStartIndex, min(newFrame, clipEndIndex))
+
+        updatePlayheadPosition()
+        updateTimeLabel()
+        seekPlayer(toFrameIndex: clipPlayheadPosition)
+    }
+
+    // MARK: - Save clip to Photos
+
+    private func saveClipToPhotos() {
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        guard status != .denied && status != .restricted else {
+            showPhotosPermissionAlert(); return
+        }
+
+        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let frames    = clipEndIndex - clipStartIndex
+        let secs      = frames / max(actualFPS, 1)
+
+        if secs > 60 {
+            let alert = UIAlertController(
+                title:   "Long Clip",
+                message: "This clip is \(secs / 60):\(String(format: "%02d", secs % 60)) long. Saving may take a moment.",
+                preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            alert.addAction(UIAlertAction(title: "Save",   style: .default) { [weak self] _ in
+                self?.performSaveClip()
+            })
+            window?.rootViewController?.present(alert, animated: true)
+            return
+        }
+        performSaveClip()
+    }
+
+    private func performSaveClip() {
+        let loading = createLoadingView(text: "Saving to Album...")
+        addSubview(loading)
 
         createClipVideo { [weak self] url in
-            guard let self = self else { return }
-
-            guard let url = url else {
+            guard let self else { return }
+            guard let url else {
                 DispatchQueue.main.async {
-                    loadingView.removeFromSuperview()
+                    loading.removeFromSuperview()
                     self.showError("Failed to create video clip")
                 }
                 return
             }
-
-            // Request authorization (will prompt if notDetermined, skip if already authorized)
             PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
                 DispatchQueue.main.async {
                     guard status == .authorized || status == .limited else {
-                        loadingView.removeFromSuperview()
+                        loading.removeFromSuperview()
                         self.showPhotosPermissionAlert()
                         return
                     }
-
                     PHPhotoLibrary.shared().performChanges({
                         PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url)
                     }) { success, error in
                         DispatchQueue.main.async {
-                            loadingView.removeFromSuperview()
+                            loading.removeFromSuperview()
                             if success {
-                                print("✅ Clip saved to Photos")
                                 self.showSuccessFeedback()
                                 self.exitClipMode()
                             } else {
-                                print("❌ Failed to save: \(error?.localizedDescription ?? "unknown")")
                                 self.showError("Failed to save to Album")
                             }
                         }
@@ -1118,1428 +1907,154 @@ class DelayedCameraView: UIView {
 
     private func showPhotosPermissionAlert() {
         let alert = UIAlertController(
-            title: "Photos Access Required",
-            message: "Loopr needs permission to save clips to your Photos library. Tap Open Settings, then enable Photos for Loopr.",
-            preferredStyle: .alert
-        )
+            title:   "Photos Access Required",
+            message: "Loopr needs permission to save clips to your Photos library.",
+            preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
-            if let url = URL(string: UIApplication.openSettingsURLString) {
-                UIApplication.shared.open(url)
+            if let u = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(u)
             }
         })
         alert.addAction(UIAlertAction(title: "Not Now", style: .cancel))
-
-        if let viewController = self.window?.rootViewController {
-            viewController.present(alert, animated: true)
-        }
+        window?.rootViewController?.present(alert, animated: true)
     }
 
-    private func restartCountdown() {
-        if isLooping {
-            stopLoop()
-        }
+    // MARK: - Clip export
 
-        if isClipMode {
-            exitClipMode()
-        }
+    private func createClipVideo(completion: @escaping (URL?) -> Void) {
+        guard let videoFileBuffer else { completion(nil); return }
 
-        hideControls()
-        isPaused = false
-        isShowingDelayed = false
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("swingclip_\(Date().timeIntervalSince1970).mp4")
+        try? FileManager.default.removeItem(at: outputURL)
 
-        metadataLock.lock()
-        frameMetadata.removeAll()
-        metadataLock.unlock()
-
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let maxDuration = 60 + delaySeconds + 10  // 60s scrub + delay + 10s buffer
-        
-        videoFileBuffer = VideoFileBuffer(
-            maxDurationSeconds: maxDuration,
-            delaySeconds: delaySeconds,
-            fps: actualFPS,
-            writeQueue: captureQueue
-        )
-        videoDataOutput?.setSampleBufferDelegate(self, queue: captureQueue)
-
-        // Always use 1080p at 30fps for best quality
-        let videoWidth = 1920
-        let videoHeight = 1080
-        
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: videoWidth,
-            AVVideoHeightKey: videoHeight,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: videoWidth * videoHeight * 11,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoExpectedSourceFrameRateKey: actualFPS,
-                AVVideoMaxKeyFrameIntervalKey: actualFPS
-            ]
-        ]
-        try? videoFileBuffer?.startWriting(videoSettings: videoSettings, isInitialStart: true)
-
-        UIView.animate(withDuration: 0.3) {
-            self.previewLayer?.opacity = 1
-            self.displayImageView.alpha = 0
-        }
-
-        startCountdown()
-    }
-
-
-    @objc private func handleScrubberPan(_ gesture: UIPanGestureRecognizer) {
-        if gesture.state == .began {
-            print("🎯 Scrubber pan BEGAN at location: \(gesture.location(in: timelineContainer))")
-            if isLooping {
-                stopLoop()
-            }
-        }
-        
-        let location = gesture.location(in: timelineContainer)
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else {
-            print("⚠️ Not enough frames: \(totalFrames) < \(requiredFrames)")
-            return
-        }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size for scrub range
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard scrubRange > 0, timelineWidth > 0 else {
-            print("⚠️ Invalid range or width: scrubRange=\(scrubRange), width=\(timelineWidth)")
-            return
-        }
-        
-        let clampedX = max(0, min(location.x, timelineWidth))
-        let normalizedPosition = clampedX / timelineWidth
-        let frameIndex = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
-        
-        let beforeClamp = frameIndex
-        scrubberPosition = max(oldestAllowedIndex, min(frameIndex, pausePointIndex))
-        
-        let beforeMinClamp = scrubberPosition
-        scrubberPosition = max(1, scrubberPosition)
-        
-        if gesture.state == .began || gesture.state == .ended {
-            print("📍 Scrubber position update:")
-            print("   location.x: \(location.x), clampedX: \(clampedX)")
-            print("   timelineWidth: \(timelineWidth)")
-            print("   normalizedPosition: \(normalizedPosition)")
-            print("   oldestAllowed: \(oldestAllowedIndex), pausePoint: \(pausePointIndex)")
-            //print("   scrubRange: \(scrubRange), cacheSize: \(cacheFrameCount)")
-            print("   frameIndex (before clamp): \(beforeClamp)")
-            print("   after range clamp: \(beforeMinClamp)")
-            print("   FINAL scrubberPosition: \(scrubberPosition)")
-        }
-        
-        loopFrameIndex = scrubberPosition
-        updateScrubberPlayheadPosition()
-        
-        let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / Float(actualFPS)
-        DispatchQueue.main.async {
-            self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
-        }
-        
-        // FIX: Use cache for instant display during scrubbing (no async delay)
-        if let cachedImage = videoFileBuffer?.getRecentFrame(at: scrubberPosition) {
-            displayFrame(cachedImage)
-        } else {
-            // Fallback to file extraction only if not in cache
-            // But don't throttle on .began or .ended
-            if gesture.state == .began || gesture.state == .ended {
-                videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
-                    guard let self = self, let image = image else { return }
-                    // Only display if we're still at this position
-                    if self.scrubberPosition == scrubberPosition {
-                        self.displayFrame(image)
-                    }
-                }
-            } else {
-                // During .changed, throttle file extraction
-                let currentTime = CACurrentMediaTime()
-                if currentTime - lastUpdateTime >= 0.05 {
-                    lastUpdateTime = currentTime
-                    videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
-                        guard let self = self, let image = image else { return }
-                        // Only display if we're still at this position
-                        if self.scrubberPosition == scrubberPosition {
-                            self.displayFrame(image)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func updateScrubberPlayheadPosition() {
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else { return }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size, not hardcoded
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
-        
-        guard scrubRange > 0 else { return }
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard timelineWidth > 0 else { return }
-        
-        // Clamp scrubberPosition to valid range
-        let clampedPosition = max(oldestAllowedIndex, min(scrubberPosition, pausePointIndex))
-        
-        let normalizedPosition = CGFloat(clampedPosition - oldestAllowedIndex) / CGFloat(scrubRange)
-        let playheadX = normalizedPosition * timelineWidth
-        
-        scrubberPlayheadConstraint?.constant = playheadX
-        
-        // Update touch area constraint to center it on the playhead
-        let idealTouchAreaX = playheadX - 22  // Center 44px touch area on playhead
-        let clampedTouchAreaX = max(0, min(idealTouchAreaX, timelineWidth - 44))
-        scrubberTouchAreaConstraint?.constant = clampedTouchAreaX
-        
-        timelineContainer.layoutIfNeeded()
-        
-        //validatePlayheadSync()
-    }
-
-    private func startLoop() {
-        print("▶️ Starting loop playback")
-        isLooping = true
-
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let image = UIImage(systemName: "pause.fill", withConfiguration: config)
-        playPauseButton.setImage(image, for: .normal)
-
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else { return }
-
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size instead of hardcoded 30*30
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        let startFrame: Int
-        let endFrame: Int
-
-        if isClipMode {
-            startFrame = clipStartIndex
-            endFrame = clipEndIndex
-            loopFrameIndex = clipPlayheadPosition
-        } else {
-            startFrame = oldestAllowedIndex
-            endFrame = pausePointIndex
-            loopFrameIndex = max(1, scrubberPosition)
-        }
-
-        loopTimer = Timer.scheduledTimer(withTimeInterval: 1.0/Double(actualFPS), repeats: true) { [weak self] _ in
-            guard let self = self, self.isLooping else { return }
-
-            self.videoFileBuffer?.extractFrameFromFile(at: self.loopFrameIndex) { [weak self] image in
-                guard let self = self, let image = image else { return }
-                self.displayFrame(image)
-            }
-
-            if self.isClipMode {
-                self.clipPlayheadPosition = self.loopFrameIndex
-                self.updatePlayheadPosition()
-                self.updateTimeLabel()
-            } else {
-                self.scrubberPosition = self.loopFrameIndex
-                self.updateScrubberPlayheadPosition()
-                
-                let secondsFromStart = Float(self.loopFrameIndex - startFrame) / Float(actualFPS)
-                DispatchQueue.main.async {
-                    self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
-                }
-            }
-
-            self.loopFrameIndex += 1
-
-            if self.loopFrameIndex >= endFrame {
-                self.loopFrameIndex = startFrame
-            }
-        }
-
-        RunLoop.main.add(loopTimer!, forMode: .common)
-    }
-
-    private func stopLoop() {
-        print("⏸️ Stopping loop playback")
-        isLooping = false
-        loopTimer?.invalidate()
-        loopTimer = nil
-
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let image = UIImage(systemName: "play.circle.fill", withConfiguration: config)
-        playPauseButton.setImage(image, for: .normal)
-    }
-
-    @objc private func orientationDidChange() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.forceOrientationUpdate()
-        }
-    }
-
-    private func forceOrientationUpdate() {
-        guard let connection = previewLayer?.connection else { return }
-        let interfaceOrientation = UIApplication.shared.windows.first?.windowScene?.interfaceOrientation
-
-        if isFrontCamera {
-            switch interfaceOrientation {
-            case .landscapeLeft:
-                connection.videoRotationAngle = 0
-            case .landscapeRight:
-                connection.videoRotationAngle = 180
-            case .portrait:
-                connection.videoRotationAngle = 90
-            case .portraitUpsideDown:
-                connection.videoRotationAngle = 270
-            default:
-                connection.videoRotationAngle = 0
-            }
-        } else {
-            switch interfaceOrientation {
-            case .landscapeLeft:
-                connection.videoRotationAngle = 180
-            case .landscapeRight:
-                connection.videoRotationAngle = 0
-            case .portrait:
-                connection.videoRotationAngle = 90
-            case .portraitUpsideDown:
-                connection.videoRotationAngle = 270
-            default:
-                connection.videoRotationAngle = 0
-            }
-        }
-    }
-
-    func startSession(delaySeconds: Int, useFrontCamera: Bool) {
-        print("🎥 Starting session - delay: \(delaySeconds)s, front: \(useFrontCamera)")
-        self.delaySeconds = delaySeconds
-        self.isActive = true
-        self.isFrontCamera = useFrontCamera
-        self.isPaused = false
-
-        metadataLock.lock()
-        frameMetadata.removeAll()
-        metadataLock.unlock()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.setupCamera(useFrontCamera: useFrontCamera)
-        }
-    }
-
-    private func setupCamera(useFrontCamera: Bool) {
-        captureSession = AVCaptureSession()
-
-        captureQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            self.captureSession.beginConfiguration()
-            // Use .high preset for best quality at 30fps
-            self.captureSession.sessionPreset = .high
-            print("📹 Using .high preset for 30fps")
-
-            let position: AVCaptureDevice.Position = useFrontCamera ? .front : .back
-            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
-                print("❌ No camera found")
-                self.captureSession.commitConfiguration()
-                return
-            }
-
-            self.currentDevice = camera
-            
-            // Get the FPS setting (always 30fps now)
-            let actualTargetFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
-            print("📹 Target FPS from settings: \(actualTargetFPS)")
-
-            do {
-                try camera.lockForConfiguration()
-
-                // Try to set the target FPS
-                var fpsSet = false
-                let targetFrameRate = Double(actualTargetFPS)
-                
-                for range in camera.activeFormat.videoSupportedFrameRateRanges {
-                    if targetFrameRate >= range.minFrameRate && targetFrameRate <= range.maxFrameRate {
-                        camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(actualTargetFPS))
-                        camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(actualTargetFPS))
-                        print("✅ Set to \(actualTargetFPS)fps")
-                        fpsSet = true
-                        break
-                    }
-                }
-                
-                if !fpsSet {
-                    print("⚠️ \(actualTargetFPS)fps not supported, falling back to 30fps")
-                    camera.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-                    camera.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
-                    // Update settings with actual FPS
-                    Settings.shared.setFPS(30, isFrontCamera: useFrontCamera)
-                    print("📹 Settings updated to 30fps for \(useFrontCamera ? "front" : "back") camera")
-                }
-
-                camera.unlockForConfiguration()
-                
-                // NOW create VideoFileBuffer with the ACTUAL FPS that will be used
-                let actualFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
-                let maxDuration = 60 + delaySeconds + 10
-                
-                videoFileBuffer = VideoFileBuffer(
-                    maxDurationSeconds: maxDuration,
-                    delaySeconds: delaySeconds,
-                    fps: actualFPS,
-                    writeQueue: captureQueue
-                )
-                print("📹 VideoFileBuffer created with \(actualFPS)fps")
-
-                let input = try AVCaptureDeviceInput(device: camera)
-                if self.captureSession.canAddInput(input) {
-                    self.captureSession.addInput(input)
-                    print("✅ Input added")
-                } else {
-                    print("❌ Cannot add input")
-                    self.captureSession.commitConfiguration()
-                    return
-                }
-
-                let output = AVCaptureVideoDataOutput()
-                output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-                // Keep all frames for smooth delayed playback at 30fps
-                output.alwaysDiscardsLateVideoFrames = false
-                output.setSampleBufferDelegate(self, queue: self.captureQueue)
-
-                if self.captureSession.canAddOutput(output) {
-                    self.captureSession.addOutput(output)
-                    print("✅ Output added")
-                } else {
-                    print("❌ Cannot add output")
-                    self.captureSession.commitConfiguration()
-                    return
-                }
-
-                self.videoDataOutput = output
-                self.captureSession.commitConfiguration()
-
-                try camera.lockForConfiguration()
-                let savedZoom = Settings.shared.currentZoomFactor(isFrontCamera: useFrontCamera)
-                let maxZoom = camera.activeFormat.videoMaxZoomFactor
-                let minZoom = camera.minAvailableVideoZoomFactor
-                let customMinZoom: CGFloat = 1.0
-                let customMaxZoom: CGFloat = 10.0
-                let effectiveMin = max(minZoom, customMinZoom)
-                let effectiveMax = min(maxZoom, customMaxZoom)
-                let clampedZoom = min(max(savedZoom, effectiveMin), effectiveMax)
-                camera.videoZoomFactor = clampedZoom
-                camera.unlockForConfiguration()
-                print("🔍 Applied zoom: \(clampedZoom)x")
-
-                // Always use 1080p at 30fps for best quality
-                let videoWidth = 1920
-                let videoHeight = 1080
-                
-                let videoSettings: [String: Any] = [
-                    AVVideoCodecKey: AVVideoCodecType.h264,
-                    AVVideoWidthKey: videoWidth,
-                    AVVideoHeightKey: videoHeight,
-                    AVVideoCompressionPropertiesKey: [
-                        // Optimized bitrate for 1080p@30fps
-                        AVVideoAverageBitRateKey: videoWidth * videoHeight * 11,
-                        AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                        AVVideoExpectedSourceFrameRateKey: actualFPS,
-                        AVVideoMaxKeyFrameIntervalKey: actualFPS
-                    ]
-                ]
-                
-                print("📹 Video settings: 1080p @ \(actualFPS)fps")
-                
-                print("📹 Video settings configured for \(actualFPS)fps")
-
-                try self.videoFileBuffer?.startWriting(videoSettings: videoSettings, isInitialStart: true)
-
-                DispatchQueue.main.async {
-                    let preview = AVCaptureVideoPreviewLayer(session: self.captureSession)
-                    preview.videoGravity = .resizeAspectFill
-                    preview.frame = self.bounds
-                    self.layer.insertSublayer(preview, at: 0)
-                    self.previewLayer = preview
-
-                    DispatchQueue.main.async {
-                        self.forceOrientationUpdate()
-                    }
-
-                    self.bringSubviewToFront(self.displayImageView)
-                    self.bringSubviewToFront(self.countdownLabel)
-                    self.bringSubviewToFront(self.countdownStopButton)
-                    self.bringSubviewToFront(self.livePauseButton)
-                    self.bringSubviewToFront(self.successFeedbackView)
-                    self.bringSubviewToFront(self.cancelClipButton)
-                    self.bringSubviewToFront(self.recordingIndicator)
-                    self.bringSubviewToFront(self.controlsContainer)
-                    self.bringSubviewToFront(self.topRightButtonContainer)
-                    print("✅ Preview layer added")
-
-                    self.captureQueue.async {
-                        if !self.captureSession.isRunning {
-                            self.captureSession.startRunning()
-                            print("✅ Camera session RUNNING")
-                        }
-
-                        DispatchQueue.main.async {
-                            self.startCountdown()
-                        }
-                    }
-                }
-
-            } catch {
-                print("❌ Camera setup error: \(error)")
-                self.captureSession.commitConfiguration()
-            }
-        }
-    }
-
-    private func startCountdown() {
-        var countdown = delaySeconds
-        countdownLabel.text = "\(countdown)"
-        countdownLabel.alpha = 1
-        countdownStopButton.alpha = 1
-
-        print("⏱️ Starting countdown from \(countdown)")
-
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-            guard let self = self, self.isActive else {
-                timer.invalidate()
-                return
-            }
-
-            countdown -= 1
-            if countdown > 0 {
-                self.countdownLabel.text = "\(countdown)"
-                print("⏱️ Countdown: \(countdown)")
-            } else {
-                /*
-                timer.invalidate()
-                self.countdownLabel.text = "🎬"
-                print("⏱️ Countdown complete!")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.switchToDelayedView()
-                }
-                */
-                timer.invalidate()
-                self.countdownLabel.text = ""
-                
-                // Add camera icon
-                let config = UIImage.SymbolConfiguration(pointSize: 80, weight: .bold)
-                //let imageView = UIImageView(image: UIImage(systemName: "video.fill", withConfiguration: config))
-                let imageView = UIImageView(image: UIImage(systemName: "figure.baseball", withConfiguration: config))
-                imageView.tintColor = .white
-                imageView.contentMode = .center
-                imageView.translatesAutoresizingMaskIntoConstraints = false
-                imageView.tag = 1000 // Tag to remove it later
-                
-                self.countdownLabel.addSubview(imageView)
-                NSLayoutConstraint.activate([
-                    imageView.centerXAnchor.constraint(equalTo: self.countdownLabel.centerXAnchor),
-                    imageView.centerYAnchor.constraint(equalTo: self.countdownLabel.centerYAnchor),
-                    imageView.widthAnchor.constraint(equalToConstant: 100),
-                    imageView.heightAnchor.constraint(equalToConstant: 100)
-                ])
-                
-                print("⏱️ Countdown complete!")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    // Remove the icon before switching
-                    if let icon = self.countdownLabel.viewWithTag(1000) {
-                        icon.removeFromSuperview()
-                    }
-                    self.switchToDelayedView()
-                }
-            }
-        }
-    }
-
-    private func switchToDelayedView() {
-        print("🔄 Switching to delayed view")
-        isShowingDelayed = true
-
-        if let delayLabel = recordingIndicator.viewWithTag(997) as? UILabel {
-            delayLabel.text = "-\(delaySeconds)s"
-        }
-
-        startRecordingIndicator()
-        startActivityCheckTimer()
-
-        UIView.animate(withDuration: 0.5) {
-            self.previewLayer?.opacity = 0
-            self.displayImageView.alpha = 1
-            self.countdownLabel.alpha = 0
-            self.countdownStopButton.alpha = 0
-        }
-
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0/Double(actualFPS), repeats: true) { [weak self] _ in
-            self?.updateDisplay()
-        }
-
-        RunLoop.main.add(displayTimer!, forMode: .common)
-        print("✅ Display timer started at \(actualFPS)fps")
-    }
-
-    private func updateDisplay() {
-        guard isActive, isShowingDelayed, !isPaused else { return }
-
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        
-        if totalFrames < requiredFrames {
-            if totalFrames % actualFPS == 0 {  // Log every second
-                print("⏳ Waiting for buffer: \(totalFrames)/\(requiredFrames) frames (\(Float(totalFrames)/Float(actualFPS))s/\(delaySeconds)s)")
-            }
-            return
-        }
-        
-        guard requiredFrames > 0 else { return }
-
-        let index = totalFrames - requiredFrames
-        guard index >= 0 && index < totalFrames else { return }
-
-        currentDisplayFrameIndex = index
-
-        if let image = videoFileBuffer?.getRecentFrame(at: index) {
-            displayFrame(image)
-        } else {
-            print("⚠️ Failed to get frame \(index) from cache (totalFrames: \(totalFrames))")
-        }
-
-        DispatchQueue.main.async {
-            self.timeLabel.text = "LIVE"
-        }
-    }
-
-    private func displayFrame(_ rawImage: UIImage) {
-        guard let cgImage = rawImage.cgImage else {
-            displayImageView.image = rawImage
-            return
+        guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp4) else {
+            completion(nil); return
         }
 
         let rotationAngle = previewLayer?.connection?.videoRotationAngle ?? 0
+        let actualFPS     = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let isRotated     = rotationAngle == 90 || rotationAngle == 270
+        let videoW        = isRotated ? 1080 : 1920
+        let videoH        = isRotated ? 1920 : 1080
 
-        let displayImage: UIImage
-        switch rotationAngle {
-        case 0:
-            displayImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
-        case 90:
-            displayImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-        case 180:
-            displayImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .down)
-        case 270:
-            displayImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .left)
-        default:
-            displayImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey:  AVVideoCodecType.h264,
+            AVVideoWidthKey:  videoW,
+            AVVideoHeightKey: videoH,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey:          videoW * videoH * 11,
+                AVVideoProfileLevelKey:            AVVideoProfileLevelH264HighAutoLevel,
+                AVVideoExpectedSourceFrameRateKey: actualFPS,
+                AVVideoMaxKeyFrameIntervalKey:     actualFPS
+            ]
+        ]
+
+        let writerInput = AVAssetWriterInput(
+            mediaType: .video, outputSettings: videoSettings)
+        writerInput.expectsMediaDataInRealTime = false
+
+        let srcAttrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey  as String: videoW,
+            kCVPixelBufferHeightKey as String: videoH
+        ]
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: writerInput, sourcePixelBufferAttributes: srcAttrs)
+
+        guard writer.canAdd(writerInput) else { completion(nil); return }
+        writer.add(writerInput)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        // Use AVAssetExportSession on the composition for the clip range.
+        // This is far more reliable than frame-by-frame extraction.
+        guard let composition = videoFileBuffer.pausedComposition else {
+            completion(nil); return
         }
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.displayImageView.image = displayImage
-            if self.isFrontCamera {
-                self.displayImageView.transform = CGAffineTransform(scaleX: -1, y: 1)
-            } else {
-                self.displayImageView.transform = .identity
+        let startTime = videoFileBuffer.compositionTime(forFrameIndex: clipStartIndex) ?? .zero
+        let endTime   = videoFileBuffer.compositionTime(forFrameIndex: clipEndIndex)
+                        ?? composition.duration
+
+        guard let exporter = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPreset1920x1080) else {
+            completion(nil); return
+        }
+
+        exporter.outputURL      = outputURL
+        exporter.outputFileType = .mp4
+        exporter.timeRange      = CMTimeRange(start: startTime, end: endTime)
+
+        // Apply orientation transform via video composition.
+        let videoComposition = AVMutableVideoComposition(
+            propertiesOf: composition)
+        videoComposition.renderSize = CGSize(width: videoW, height: videoH)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(actualFPS))
+
+        // Build a simple passthrough instruction with the right transform.
+        if let compTrack = composition.tracks(withMediaType: .video).first {
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: startTime, end: endTime)
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
+
+            var transform = CGAffineTransform.identity
+            let rad = CGFloat(rotationAngle) * .pi / 180.0
+            transform = transform.rotated(by: rad)
+            // Translate back into positive frame after rotation.
+            switch rotationAngle {
+            case 90:
+                transform = transform.translatedBy(x: 0, y: -CGFloat(videoH))
+            case 180:
+                transform = transform.translatedBy(x: -CGFloat(videoW), y: -CGFloat(videoH))
+            case 270:
+                transform = transform.translatedBy(x: -CGFloat(videoW), y: 0)
+            default:
+                break
             }
-            
-            // FIX: Track what frame we're actually displaying
-            if self.isClipMode {
-                self.currentDisplayFrameIndex = self.clipPlayheadPosition
-            } else if self.isPaused {
-                self.currentDisplayFrameIndex = self.scrubberPosition
+            if isFrontCamera {
+                // Mirror horizontally: flip on the vertical axis after rotation.
+                transform = transform.scaledBy(x: -1, y: 1)
+                switch rotationAngle {
+                case 90:
+                    transform = transform.translatedBy(x: -CGFloat(videoW), y: 0)
+                case 270:
+                    transform = transform.translatedBy(x: CGFloat(videoW), y: 0)
+                case 180:
+                    transform = transform.translatedBy(x: CGFloat(videoW * 2), y: 0)
+                default:
+                    transform = transform.translatedBy(x: -CGFloat(videoW), y: 0)
+                }
             }
-        }
-    }
-    
-    private func validatePlayheadSync() {
-        let displayedFrame = currentDisplayFrameIndex
-        let expectedFrame = isClipMode ? clipPlayheadPosition : scrubberPosition
-        
-        if displayedFrame != expectedFrame {
-            print("⚠️ FRAME MISMATCH - Displayed: \(displayedFrame), Expected: \(expectedFrame), Mode: \(isClipMode ? "Clip" : "Scrub")")
-        }
-    }
 
-    func pausePlayback() {
-        guard isShowingDelayed, !isPaused else { return }
-        
-        print("⏸️ Paused - Stopping capture")
-        
-        isPaused = true
-        displayTimer?.invalidate()
-        displayTimer = nil
-        
-        stopRecordingIndicator()
-        hideLivePauseButton()
-        
-        activityCheckTimer?.invalidate()  // Make sure this is here
-        activityCheckTimer = nil
-        activityCountdownTimer?.invalidate()  // Make sure this is here
-        activityCountdownTimer = nil
-        
-        hideActivityCheck()
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else {
-            print("⚠️ Not enough frames to pause")
-            return
+            layerInstruction.setTransform(transform, at: .zero)
+            instruction.layerInstructions = [layerInstruction]
+            videoComposition.instructions = [instruction]
         }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        scrubberPosition = pausePointIndex
-        loopFrameIndex = pausePointIndex
-        
-        // PHASE 1: Use actual cache size for scrub range
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
 
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        
-        print("📊 Pause Debug:")
-        print("   FPS: \(actualFPS)")
-        print("   Delay: \(delaySeconds)s = \(requiredFrames) frames")
-        print("   Total frames captured: \(totalFrames)")
-        print("   Pause point: \(pausePointIndex)")
-        print("   Scrub back: 60s = \(scrubBackFrames) frames")
-        print("   Desired oldest: \(desiredOldestIndex)")
-        print("   Cache size: \(cacheSize) frames (~\(Float(cacheSize)/Float(actualFPS))s)")
-        print("   Oldest in cache: \(oldestInCache)")
-        print("   Oldest allowed: \(oldestAllowedIndex)")
-        print("   Available range: \(oldestAllowedIndex) to \(pausePointIndex)")
-        print("   Available frames: \(pausePointIndex - oldestAllowedIndex) (~\(Float(pausePointIndex - oldestAllowedIndex)/Float(actualFPS))s)")
-        print("   LIMITED BY: \(oldestAllowedIndex == oldestInCache ? "CACHE SIZE" : "DESIRED RANGE")")
-        
-        videoFileBuffer?.pauseRecording { [weak self] fileURL in
-            guard let self = self else { return }
-            
-            if fileURL != nil {
-                print("✅ File ready for scrubbing")
-            } else {
-                print("⚠️ Pause completed but file may not be ready")
-            }
-            
+        exporter.videoComposition = videoComposition
+
+        exporter.exportAsynchronously {
             DispatchQueue.main.async {
-                self.showControls()
-                self.updateScrubberPlayheadPosition()
-                
-                let secondsFromStart = Float(self.scrubberPosition - oldestAllowedIndex) / Float(actualFPS)
-                self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
-            }
-        }
-        
-        self.showControls()
-    }
-
-    func stopSession() {
-        print("🛑 Stopping session")
-        isActive = false
-        isShowingDelayed = false
-        isPaused = false
-        stopRecordingIndicator()
-        stopLoop()
-        
-        displayTimer?.invalidate()
-        displayTimer = nil
-        hideControlsTimer?.invalidate()
-        hideControlsTimer = nil
-        
-        activityCheckTimer?.invalidate()
-        activityCountdownTimer?.invalidate()
-        hideActivityCheck()
-        
-        captureQueue.async { [weak self] in
-            guard let self = self else { return }
-            if self.captureSession?.isRunning == true {
-                self.captureSession?.stopRunning()
-                print("✅ Capture session stopped")
-            }
-            
-            DispatchQueue.main.async {
-                self.previewLayer?.removeFromSuperlayer()
-                self.captureSession = nil
-                self.videoDataOutput = nil
-                self.previewLayer = nil
-                self.controlsContainer.alpha = 0
-                self.topRightButtonContainer.alpha = 0  // ADD THIS LINE
-                self.countdownStopButton.alpha = 0
-                self.livePauseButton.alpha = 0
-                self.onSessionStopped?()
-            }
-            
-            self.videoFileBuffer?.stopWriting {
-                print("✅ Video file buffer stopped")
-            }
-        }
-        
-        metadataLock.lock()
-        frameMetadata.removeAll()
-        metadataLock.unlock()
-        
-        displayImageView.image = nil
-    }
-
-    // MARK: - Clip Selection Methods
-    private func enterClipMode() {
-        print("✂️ Entering clip mode")
-        isClipMode = true
-
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else {
-            print("⚠️ Not enough frames to enter clip mode")
-            return
-        }
-
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size instead of hardcoded 30*30
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-
-        // FIX: Ensure we have a valid range before entering clip mode
-        guard pausePointIndex > oldestAllowedIndex else {
-            print("⚠️ Invalid frame range for clip mode: oldest=\(oldestAllowedIndex) pause=\(pausePointIndex)")
-            return
-        }
-
-        print("✂️ Clip range: \(oldestAllowedIndex) to \(pausePointIndex) (\(scrubBackFrames) frames, ~\(Float(scrubBackFrames)/Float(actualFPS))s)")
-
-        // NEW: Default to FULL RANGE (start to end)
-        clipStartIndex = oldestAllowedIndex
-        clipEndIndex = pausePointIndex
-
-        // FIX: Set playhead to the current scrubber position instead of start
-        clipPlayheadPosition = scrubberPosition
-        loopFrameIndex = clipPlayheadPosition
-
-        // Transform button to save icon
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let saveImage = UIImage(systemName: "arrow.down.to.line.circle.fill", withConfiguration: config)
-        clipSaveButton.setImage(saveImage, for: .normal)
-        clipSaveButton.tintColor = .white
-
-        UIView.animate(withDuration: 0.3) {
-            // Hide scrubber completely
-            self.scrubberBackground.alpha = 0
-            self.scrubberPlayhead.alpha = 0
-
-            // Show purple clip background
-            self.clipRegionBackground.isHidden = false
-
-            // Show clip UI
-            self.leftDimView.isHidden = false
-            self.rightDimView.isHidden = false
-            self.topBorder.isHidden = false
-            self.bottomBorder.isHidden = false
-            self.leftTrimHandle.isHidden = false
-            self.rightTrimHandle.isHidden = false
-            self.clipPlayhead.isHidden = false
-            self.playheadTouchArea.isHidden = false
-
-            // Show cancel button (top left)
-            self.cancelClipButton.isHidden = false
-
-            // Recording indicator stays hidden
-        }
-
-        timelineContainer.layoutIfNeeded()
-        updateClipHandlePositions()
-        updatePlayheadPosition()
-        updateTimeLabel()
-
-        // FIX: Display the frame at the current playhead position immediately
-        displayFrameAtPlayhead()
-    }
-
-    @objc private func cancelClipTapped() {
-        print("❌ Canceling clip mode")
-
-        if isLooping {
-            stopLoop()
-        }
-
-        exitClipMode()
-    }
-
-    private func exitClipMode() {
-        print("❌ Exiting clip mode")
-        
-        // FIX: Sync scrubber position with current clip playhead before exiting
-        scrubberPosition = clipPlayheadPosition
-        
-        isClipMode = false
-
-        // Transform button back to edit icon
-        let config = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        let editImage = UIImage(systemName: "film.circle.fill", withConfiguration: config)
-        clipSaveButton.setImage(editImage, for: .normal)
-        clipSaveButton.tintColor = .white
-
-        UIView.animate(withDuration: 0.3) {
-            // Hide clip UI
-            self.leftDimView.isHidden = true
-            self.rightDimView.isHidden = true
-            self.topBorder.isHidden = true
-            self.bottomBorder.isHidden = true
-            self.leftTrimHandle.isHidden = true
-            self.rightTrimHandle.isHidden = true
-            self.clipPlayhead.isHidden = true
-            self.playheadTouchArea.isHidden = true
-            self.clipRegionBackground.isHidden = true
-
-            // Show scrubber
-            self.scrubberBackground.alpha = 1
-            self.scrubberPlayhead.alpha = 1
-
-            // Hide cancel button
-            self.cancelClipButton.isHidden = true
-        }
-        
-        // FIX: Update scrubber to show current position
-        updateScrubberPlayheadPosition()
-        
-        // FIX: Calculate correct time label for scrubber mode
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        if totalFrames >= requiredFrames {
-            let pausePointIndex = totalFrames - requiredFrames  // ADD THIS LINE
-            let scrubBackFrames = scrubDurationSeconds * actualFPS
-            let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-            // Can't go older than what's in cache
-            let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-            let oldestInCache = max(1, totalFrames - cacheSize)
-            let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-            
-            let secondsFromStart = Float(scrubberPosition - oldestAllowedIndex) / Float(actualFPS)
-            DispatchQueue.main.async {
-                self.timeLabel.text = String(format: "%05.2f", secondsFromStart)
-            }
-        }
-        
-        // FIX: Display the frame at the scrubber position
-        videoFileBuffer?.extractFrameFromFile(at: scrubberPosition) { [weak self] image in
-            guard let self = self, let image = image else { return }
-            self.displayFrame(image)
-        }
-    }
-
-    private func updateClipHandlePositions() {
-        guard isClipMode else { return }
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size for the range
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        
-        let totalClipRange = pausePointIndex - oldestAllowedIndex
-        guard totalClipRange > 0 else { return }
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard timelineWidth > 0 else { return }
-        
-        // Calculate normalized positions (0.0 to 1.0) within the scrub range
-        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        
-        // Convert to pixel positions
-        let leftPosition = leftNormalized * timelineWidth
-        let rightPosition = rightNormalized * timelineWidth
-        
-        // Update constraints
-        leftHandleConstraint?.constant = leftPosition
-        rightHandleConstraint?.constant = -(timelineWidth - rightPosition)
-        
-        timelineContainer.layoutIfNeeded()
-    }
-
-    private func updatePlayheadPosition() {
-        // FIX: Only update playhead position when in clip mode
-        guard isClipMode else { return }
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else { return }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard timelineWidth > 0 else { return }
-        
-        // Calculate handle positions within the timeline
-        let totalClipRange = pausePointIndex - oldestAllowedIndex
-        guard totalClipRange > 0 else { return }
-        
-        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        
-        let leftPosition = leftNormalized * timelineWidth
-        let rightPosition = rightNormalized * timelineWidth
-        
-        let leftHandleRightEdge = leftPosition + handleWidth
-        let rightHandleLeftEdge = rightPosition - handleWidth
-        let clipRegionWidth = rightHandleLeftEdge - leftHandleRightEdge
-        
-        // Guard against division by zero
-        guard clipEndIndex > clipStartIndex else {
-            print("⚠️ Invalid clip range: start=\(clipStartIndex) end=\(clipEndIndex)")
-            return
-        }
-        
-        // Calculate playhead position within the clip region
-        let normalizedPlayheadPosition = CGFloat(clipPlayheadPosition - clipStartIndex) / CGFloat(clipEndIndex - clipStartIndex)
-        let playheadPosition = leftHandleRightEdge + (normalizedPlayheadPosition * clipRegionWidth)
-        
-        // Verify the position is valid before setting constraint
-        guard playheadPosition.isFinite else {
-            print("⚠️ Invalid playhead position calculated: \(playheadPosition)")
-            return
-        }
-        
-        playheadConstraint?.constant = playheadPosition
-        
-        // Clamp touch area within timeline bounds
-        let touchAreaWidth: CGFloat = 44
-        let idealTouchX = playheadPosition - (touchAreaWidth / 2)
-        let clampedTouchX = max(0, min(idealTouchX, timelineWidth - touchAreaWidth))
-        playheadTouchArea.frame.origin.x = clampedTouchX
-        
-        timelineContainer.layoutIfNeeded()
-        
-        //validatePlayheadSync()
-    }
-
-    private func updateTimeLabel() {
-        // FIX: Only update time label for clip mode
-        guard isClipMode else { return }
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let timeInClip = Float(clipPlayheadPosition - clipStartIndex) / Float(actualFPS)
-        DispatchQueue.main.async {
-            self.timeLabel.text = String(format: "%05.2f", timeInClip)
-        }
-    }
-
-    private func displayFrameAtPlayhead() {
-        guard isClipMode else { return }
-        
-        // Extract and display the frame at the current playhead position
-        videoFileBuffer?.extractFrameFromFile(at: clipPlayheadPosition) { [weak self] image in
-            guard let self = self else { return }
-            
-            if let image = image {
-                self.displayFrame(image)
-            } else {
-                // FIX: If file extraction fails, try getting from cache
-                if let cachedImage = self.videoFileBuffer?.getRecentFrame(at: self.clipPlayheadPosition) {
-                    self.displayFrame(cachedImage)
+                if exporter.status == .completed {
+                    completion(outputURL)
                 } else {
-                    print("⚠️ Could not display frame at index \(self.clipPlayheadPosition)")
+                    print("❌ Export failed: \(exporter.error?.localizedDescription ?? "unknown")")
+                    completion(nil)
                 }
             }
         }
     }
 
-    @objc private func handleLeftTrimPan(_ gesture: UIPanGestureRecognizer) {
-        let translation = gesture.translation(in: timelineContainer)
-        
-        if gesture.state == .began {
-            if isLooping {
-                stopLoop()
-            }
-            isDraggingHandle = true
-            initialLeftPosition = leftHandleConstraint?.constant ?? 0
-            initialClipStartIndex = clipStartIndex
-            
-            self.clipPlayhead.alpha = 0
-            self.playheadTouchArea.alpha = 0
-        }
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else { return }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard timelineWidth > 0 else { return }
-        
-        let newLeftPosition = initialLeftPosition + translation.x
-        let normalizedPosition = max(0, min(newLeftPosition / timelineWidth, 1.0))
-        let newStartFrame = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
-        
-        let minStartFrame = oldestAllowedIndex
-        let maxStartFrame = clipEndIndex - actualFPS
-        
-        clipStartIndex = max(minStartFrame, min(newStartFrame, maxStartFrame))
-        clipPlayheadPosition = clipStartIndex
-        
-        updateClipHandlePositions()
-        updatePlayheadPosition()
-        updateTimeLabel()
-        
-        // FIX: Use cache during dragging with throttling
-        if gesture.state == .changed {
-            let now = CACurrentMediaTime()
-            if now - lastUpdateTime > 0.05 {
-                lastUpdateTime = now
-                let targetPosition = clipPlayheadPosition
-                if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
-                    displayFrame(cachedImage)
-                } else {
-                    videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
-                        guard let self = self, let image = image else { return }
-                        if self.clipPlayheadPosition == targetPosition {
-                            self.displayFrame(image)
-                        }
-                    }
-                }
-            }
-        } else if gesture.state == .ended || gesture.state == .cancelled {
-            isDraggingHandle = false
-            
-            // FIX: Final frame display without throttling
-            let targetPosition = clipPlayheadPosition
-            if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
-                displayFrame(cachedImage)
-            } else {
-                videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
-                    guard let self = self, let image = image else { return }
-                    if self.clipPlayheadPosition == targetPosition {
-                        self.displayFrame(image)
-                    }
-                }
-            }
-            
-            UIView.animate(withDuration: 0.3) {
-                self.clipPlayhead.alpha = 1
-                self.playheadTouchArea.alpha = 1
-            }
-        }
-    }
-
-    @objc private func handleRightTrimPan(_ gesture: UIPanGestureRecognizer) {
-        let translation = gesture.translation(in: timelineContainer)
-        
-        if gesture.state == .began {
-            if isLooping {
-                stopLoop()
-            }
-            isDraggingHandle = true
-            initialRightPosition = rightHandleConstraint?.constant ?? 0
-            initialClipEndIndex = clipEndIndex
-        }
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else { return }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        let scrubRange = pausePointIndex - oldestAllowedIndex
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard timelineWidth > 0 else { return }
-        
-        let currentXFromLeft = timelineWidth + initialRightPosition + translation.x
-        let normalizedPosition = max(0, min(currentXFromLeft / timelineWidth, 1.0))
-        let newEndFrame = oldestAllowedIndex + Int(normalizedPosition * CGFloat(scrubRange))
-        
-        let minEndFrame = clipStartIndex + 30
-        let maxEndFrame = pausePointIndex
-        
-        clipEndIndex = max(minEndFrame, min(newEndFrame, maxEndFrame))
-        clipPlayheadPosition = clipEndIndex
-        
-        updateClipHandlePositions()
-        updatePlayheadPosition()
-        updateTimeLabel()
-        
-        // FIX: Use cache during dragging with throttling
-        if gesture.state == .changed {
-            let now = CACurrentMediaTime()
-            if now - lastUpdateTime > 0.05 {
-                lastUpdateTime = now
-                let targetPosition = clipPlayheadPosition
-                if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
-                    displayFrame(cachedImage)
-                } else {
-                    videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
-                        guard let self = self, let image = image else { return }
-                        if self.clipPlayheadPosition == targetPosition {
-                            self.displayFrame(image)
-                        }
-                    }
-                }
-            }
-        } else if gesture.state == .ended || gesture.state == .cancelled {
-            isDraggingHandle = false
-            
-            // FIX: Final frame display without throttling
-            let targetPosition = clipPlayheadPosition
-            if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
-                displayFrame(cachedImage)
-            } else {
-                videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
-                    guard let self = self, let image = image else { return }
-                    if self.clipPlayheadPosition == targetPosition {
-                        self.displayFrame(image)
-                    }
-                }
-            }
-            
-            UIView.animate(withDuration: 0.3) {
-                self.clipPlayhead.alpha = 1
-                self.playheadTouchArea.alpha = 1
-            }
-        }
-    }
-
-    @objc private func handlePlayheadPan(_ gesture: UIPanGestureRecognizer) {
-        let translation = gesture.translation(in: timelineContainer)
-        
-        if gesture.state == .began {
-            initialPlayheadPosition = playheadConstraint?.constant ?? 0
-            initialClipPlayheadPosition = clipPlayheadPosition
-        }
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else { return }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard timelineWidth > 0 else { return }
-        
-        // Calculate handle positions
-        let totalClipRange = pausePointIndex - oldestAllowedIndex
-        guard totalClipRange > 0 else { return }
-        
-        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        
-        let leftPosition = leftNormalized * timelineWidth
-        let rightPosition = rightNormalized * timelineWidth
-        
-        let leftHandleRightEdge = leftPosition + handleWidth
-        let rightHandleLeftEdge = rightPosition - handleWidth
-        let clipRegionWidth = rightHandleLeftEdge - leftHandleRightEdge
-        
-        let newPlayheadX = initialPlayheadPosition + translation.x
-        let clampedX = max(leftHandleRightEdge, min(newPlayheadX, rightHandleLeftEdge))
-        
-        let normalizedPosition = (clampedX - leftHandleRightEdge) / clipRegionWidth
-        clipPlayheadPosition = clipStartIndex + Int(normalizedPosition * CGFloat(clipEndIndex - clipStartIndex))
-        clipPlayheadPosition = max(clipStartIndex, min(clipPlayheadPosition, clipEndIndex))
-        
-        updatePlayheadPosition()
-        updateTimeLabel()
-        
-        // FIX: Use cache for instant display, with position check
-        let targetPosition = clipPlayheadPosition
-        if let cachedImage = videoFileBuffer?.getRecentFrame(at: targetPosition) {
-            displayFrame(cachedImage)
-        } else {
-            // Fallback to file extraction
-            videoFileBuffer?.extractFrameFromFile(at: targetPosition) { [weak self] image in
-                guard let self = self, let image = image else { return }
-                // Only display if we're still at this position
-                if self.clipPlayheadPosition == targetPosition {
-                    self.displayFrame(image)
-                }
-            }
-        }
-    }
-
-    @objc private func handleTimelineTap(_ gesture: UITapGestureRecognizer) {
-        guard isClipMode else { return }
-        
-        let location = gesture.location(in: timelineContainer)
-        
-        metadataLock.lock()
-        let totalFrames = frameMetadata.count
-        metadataLock.unlock()
-        
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let requiredFrames = delaySeconds * actualFPS
-        guard totalFrames >= requiredFrames else { return }
-        
-        let pausePointIndex = totalFrames - requiredFrames
-        
-        // PHASE 1: Use actual cache size
-        let scrubBackFrames = scrubDurationSeconds * actualFPS
-        let desiredOldestIndex = max(1, pausePointIndex - scrubBackFrames)
-
-        // Can't go older than what's in cache
-        let cacheSize = videoFileBuffer?.getRecentFrameCount() ?? 0
-        let oldestInCache = max(1, totalFrames - cacheSize)
-        let oldestAllowedIndex = max(desiredOldestIndex, oldestInCache)
-        
-        let timelineWidth = timelineContainer.bounds.width
-        guard timelineWidth > 0 else { return }
-        
-        // Calculate handle positions
-        let totalClipRange = pausePointIndex - oldestAllowedIndex
-        guard totalClipRange > 0 else { return }
-        
-        let leftNormalized = CGFloat(clipStartIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        let rightNormalized = CGFloat(clipEndIndex - oldestAllowedIndex) / CGFloat(totalClipRange)
-        
-        let leftPosition = leftNormalized * timelineWidth
-        let rightPosition = rightNormalized * timelineWidth
-        
-        let leftHandleRightEdge = leftPosition + handleWidth
-        let rightHandleLeftEdge = rightPosition - handleWidth
-        
-        guard location.x >= leftHandleRightEdge && location.x <= rightHandleLeftEdge else { return }
-        
-        let clipRegionWidth = rightHandleLeftEdge - leftHandleRightEdge
-        let normalizedPosition = (location.x - leftHandleRightEdge) / clipRegionWidth
-        clipPlayheadPosition = clipStartIndex + Int(normalizedPosition * CGFloat(clipEndIndex - clipStartIndex))
-        clipPlayheadPosition = max(clipStartIndex, min(clipPlayheadPosition, clipEndIndex))
-        
-        updatePlayheadPosition()
-        updateTimeLabel()
-        displayFrameAtPlayhead()
-        
-        print("🎯 Playhead jumped to frame \(clipPlayheadPosition)")
-    }
+    // MARK: - Loading view / error helpers
 
     private func createLoadingView(text: String) -> UIView {
-        let container = UIView(frame: bounds)
+        let container = UIView()
         container.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        container.layer.cornerRadius = 20
+        container.clipsToBounds = true
+        container.translatesAutoresizingMaskIntoConstraints = false
 
         let spinner = UIActivityIndicatorView(style: .large)
         spinner.color = .white
@@ -2549,528 +2064,146 @@ class DelayedCameraView: UIView {
         let label = UILabel()
         label.text = text
         label.textColor = .white
-        label.font = .systemFont(ofSize: 17, weight: .semibold)
+        label.font = .systemFont(ofSize: 16, weight: .semibold)
         label.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(spinner)
         container.addSubview(label)
+        addSubview(container)
 
         NSLayoutConstraint.activate([
+            container.centerXAnchor.constraint(equalTo: centerXAnchor),
+            container.centerYAnchor.constraint(equalTo: centerYAnchor),
+            container.widthAnchor.constraint(equalToConstant: 200),
+            container.heightAnchor.constraint(equalToConstant: 120),
             spinner.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            spinner.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-
-            label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 20),
-            label.centerXAnchor.constraint(equalTo: container.centerXAnchor)
+            spinner.topAnchor.constraint(equalTo: container.topAnchor, constant: 24),
+            label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 12)
         ])
 
         return container
     }
 
-    private func createClipVideo(completion: @escaping (URL?) -> Void) {
-        guard let videoFileBuffer = videoFileBuffer else {
-            completion(nil)
-            return
-        }
-
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("swing_clip_\(Date().timeIntervalSince1970).mp4")
-
-        try? FileManager.default.removeItem(at: outputURL)
-
-        guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp4) else {
-            print("❌ Failed to create AVAssetWriter")
-            completion(nil)
-            return
-        }
-
-        // Get the current rotation angle from the preview layer
-        let rotationAngle = previewLayer?.connection?.videoRotationAngle ?? 0
-        print("🔄 Creating clip with rotation angle: \(rotationAngle), isFrontCamera: \(isFrontCamera)")
-        
-        // Get the actual FPS being used
-        let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        print("📹 Creating clip at \(actualFPS) fps")
-        
-        // Determine video dimensions based on rotation
-        let isRotated = rotationAngle == 90 || rotationAngle == 270
-        let videoWidth = isRotated ? 1080 : 1920
-        let videoHeight = isRotated ? 1920 : 1080
-
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: videoWidth,
-            AVVideoHeightKey: videoHeight,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: videoWidth * videoHeight * 11,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoExpectedSourceFrameRateKey: actualFPS,
-                AVVideoMaxKeyFrameIntervalKey: actualFPS
-            ]
-        ]
-
-        let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        writerInput.expectsMediaDataInRealTime = false
-
-        let sourcePixelBufferAttributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: videoWidth,
-            kCVPixelBufferHeightKey as String: videoHeight
-        ]
-
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: writerInput,
-            sourcePixelBufferAttributes: sourcePixelBufferAttributes
-        )
-
-        guard writer.canAdd(writerInput) else {
-            print("❌ Cannot add writer input")
-            completion(nil)
-            return
-        }
-
-        writer.add(writerInput)
-        writer.startWriting()
-        writer.startSession(atSourceTime: .zero)
-
-        let clipFrameCount = clipEndIndex - clipStartIndex
-        print("📹 Creating clip: \(clipFrameCount) frames (\(Float(clipFrameCount)/Float(actualFPS))s)")
-
-        var frameIndex = 0
-        let queue = DispatchQueue(label: "com.loopr.clipExport")
-
-        writerInput.requestMediaDataWhenReady(on: queue) { [weak self] in
-            guard let self = self else {
-                writer.cancelWriting()
-                completion(nil)
-                return
-            }
-
-            while writerInput.isReadyForMoreMediaData && frameIndex < clipFrameCount {
-                let currentFrameIndex = self.clipStartIndex + frameIndex
-                let presentationTime = CMTime(value: Int64(frameIndex), timescale: CMTimeScale(actualFPS))
-
-                let semaphore = DispatchSemaphore(value: 0)
-                var pixelBuffer: CVPixelBuffer?
-
-                videoFileBuffer.extractFrameFromFile(at: currentFrameIndex) { image in
-                    if let image = image {
-                        // Apply rotation to the image before converting to pixel buffer
-                        let rotatedImage = self.rotateImage(image, by: rotationAngle, isFrontCamera: self.isFrontCamera)
-                        if let buffer = self.pixelBuffer(from: rotatedImage, size: CGSize(width: videoWidth, height: videoHeight)) {
-                            pixelBuffer = buffer
-                        }
-                    }
-                    semaphore.signal()
-                }
-
-                semaphore.wait()
-
-                if let buffer = pixelBuffer {
-                    adaptor.append(buffer, withPresentationTime: presentationTime)
-                    frameIndex += 1
-
-                    if frameIndex % actualFPS == 0 {
-                        print("📹 Progress: \(frameIndex)/\(clipFrameCount) frames")
-                    }
-                } else {
-                    print("⚠️ Failed to extract frame at index \(currentFrameIndex)")
-                    frameIndex += 1
-                }
-            }
-
-            if frameIndex >= clipFrameCount {
-                writerInput.markAsFinished()
-                writer.finishWriting {
-                    if writer.status == .completed {
-                        print("✅ Clip created successfully: \(outputURL.lastPathComponent)")
-                        completion(outputURL)
-                    } else {
-                        print("❌ Writer failed: \(String(describing: writer.error))")
-                        completion(nil)
-                    }
-                }
-            }
-        }
-    }
-
-    private func rotateImage(_ image: UIImage, by angle: CGFloat, isFrontCamera: Bool) -> UIImage {
-        let radians = angle * .pi / 180
-        
-        // 1. Calculate the bounding box for the rotated image
-        let imgRect = CGRect(origin: .zero, size: image.size)
-        let rotatedRect = imgRect.applying(CGAffineTransform(rotationAngle: radians))
-        let targetSize = CGSize(width: abs(rotatedRect.width), height: abs(rotatedRect.height))
-
-        // 2. Start a new image context
-        UIGraphicsBeginImageContextWithOptions(targetSize, false, image.scale)
-        guard let context = UIGraphicsGetCurrentContext() else { return image }
-
-        // 3. Move origin to center
-        context.translateBy(x: targetSize.width / 2, y: targetSize.height / 2)
-        
-        // 4. Apply Rotation
-        // FIX: Back camera needs counter-clockwise (+) and Front needs clockwise (-)
-        if isFrontCamera {
-            context.rotate(by: -radians)
-        } else {
-            context.rotate(by: radians)
-        }
-        
-        // 5. Apply Mirroring for Front Camera ONLY
-        if isFrontCamera {
-            context.scaleBy(x: -1.0, y: 1.0)
-            print("🪞 Mirroring applied for front camera")
-        }
-
-        // 6. Draw the image centered
-        // image.draw(in:) is used here as it correctly handles the internal coordinate system
-        let drawRect = CGRect(x: -image.size.width / 2,
-                              y: -image.size.height / 2,
-                              width: image.size.width,
-                              height: image.size.height)
-        
-        image.draw(in: drawRect)
-
-        // 7. Retrieve the final image
-        let finalImage = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-
-        return finalImage ?? image
-    }
-
-    private func pixelBuffer(from image: UIImage, size: CGSize) -> CVPixelBuffer? {
-        let attrs = [
-            kCVPixelBufferCGImageCompatibilityKey: kCFBooleanTrue!,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: kCFBooleanTrue!,
-            kCVPixelBufferWidthKey: size.width,
-            kCVPixelBufferHeightKey: size.height
-        ] as CFDictionary
-
-        var pixelBuffer: CVPixelBuffer?
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            Int(size.width),
-            Int(size.height),
-            kCVPixelFormatType_32BGRA,
-            attrs,
-            &pixelBuffer
-        )
-
-        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
-            return nil
-        }
-
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-
-        let context = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: Int(size.width),
-            height: Int(size.height),
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        )
-
-        guard let ctx = context, let cgImage = image.cgImage else {
-            return nil
-        }
-
-        ctx.draw(cgImage, in: CGRect(origin: .zero, size: size))
-        return buffer
-    }
-
     private func showError(_ message: String) {
-        let alert = UIAlertController(title: "Error", message: message, preferredStyle: .alert)
+        let alert = UIAlertController(title: "Error", message: message,
+                                      preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
+        window?.rootViewController?.present(alert, animated: true)
+    }
 
-        if let viewController = self.window?.rootViewController {
-            viewController.present(alert, animated: true)
-        }
-    }
-    
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        // If we're in scrubber mode (paused but not clip mode) and the touch is near the timeline
-        if isPaused && !isClipMode {
-            let timelinePoint = convert(point, to: timelineContainer)
-            
-            // Expand timeline hit area by 22px horizontally to catch playhead knob touches
-            let expandedTimelineBounds = timelineContainer.bounds.insetBy(dx: -22, dy: -10)
-            
-            if expandedTimelineBounds.contains(timelinePoint) {
-                // Return the timeline so it receives the touch
-                return timelineContainer
-            }
-        }
-        
-        return super.hitTest(point, with: event)
-    }
-    
-    private func startRecordingTimer() {
-        // Start the timer at 0 when first frame is captured
-        //recordingStartTime = CACurrentMediaTime()
-        recordingStartTime = CACurrentMediaTime() + Double(delaySeconds)
-        
-        // Start the duration timer
-        recordingDurationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateRecordingDuration()
-        }
-        RunLoop.main.add(recordingDurationTimer!, forMode: .common)
-        print("⏱️ Recording timer started")
-    }
-    
+    // MARK: - Activity check
+
     private func startActivityCheckTimer() {
-        print("⏱️ startActivityCheckTimer() called")
         activityCheckTimer?.invalidate()
-        
-        print("⏱️ Creating timer with interval: \(activityCheckInterval) seconds")
-        activityCheckTimer = Timer.scheduledTimer(withTimeInterval: activityCheckInterval, repeats: false) { [weak self] timer in  // Changed to repeats: false
-            print("⏱️ TIMER FIRED! Showing activity check")
-            self?.showActivityCheck()
-        }
-        
-        if let timer = activityCheckTimer {
-            RunLoop.main.add(timer, forMode: .common)
-            print("⏱️ Activity check timer started and added to RunLoop")
-            print("⏱️ Timer valid: \(timer.isValid)")
-            print("⏱️ Timer fire date: \(timer.fireDate)")
-        } else {
-            print("❌ Failed to create activity check timer")
+        activityCheckTimer = Timer.scheduledTimer(
+            withTimeInterval: activityCheckInterval,
+            repeats: false) { [weak self] _ in
+            self?.showActivityAlert()
         }
     }
-    
-    private func showActivityCheck() {
-        print("⚠️ SHOWING ACTIVITY CHECK ALERT")
-        
-        // Bring to front to ensure it's visible
-        bringSubviewToFront(activityAlertContainer)
-        print("🔝 Brought alert to front")
-        
+
+    private func restartActivityCheckTimer() {
+        activityCheckTimer?.invalidate()
+        activityCountdownTimer?.invalidate()
+        hideActivityAlert()
+        startActivityCheckTimer()
+    }
+
+    private func showActivityAlert() {
         activityTimeRemaining = 60
-        
-        // Update button title (no countdown)
-        if let yesButton = activityAlertContainer.viewWithTag(1001) as? UIButton {
-            yesButton.setTitle("Yes, Continue", for: .normal)  // REMOVED countdown
-            print("✅ Updated button title")
-        } else {
-            print("❌ Could not find yes button")
-        }
-        
-        // Show alert
-        print("🎭 Animating alert to alpha 1")
+        updateActivityProgress(animated: false)
+
         UIView.animate(withDuration: 0.3) {
             self.activityAlertContainer.alpha = 1
         }
-        
-        // Start countdown timer
-        activityCountdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateActivityCountdown()
-        }
-        RunLoop.main.add(activityCountdownTimer!, forMode: .common)
-        print("⏱️ Countdown timer started")
-        
-        // Start progress animation
-        startProgressAnimation()
-    }
 
-    private func updateActivityCountdown() {
-        guard activityTimeRemaining > 0 else {
-            // Already at 0, don't process again
-            return
-        }
-        
-        activityTimeRemaining -= 1
-        
-        if activityTimeRemaining <= 0 {
-            // Time's up - pause the feed
-            print("⏸️ Activity check timeout - pausing feed")
-            
-            // Stop both timers immediately FIRST
-            activityCountdownTimer?.invalidate()
-            activityCountdownTimer = nil
-            activityCheckTimer?.invalidate()
-            activityCheckTimer = nil
-            
-            // Then hide and pause
-            hideActivityCheck()
-            
-            // Check if already paused before calling pausePlayback
-            if !isPaused {
-                pausePlayback()
-            }
-        }
-    }
-
-    private func startProgressAnimation() {
-        guard let yesButton = activityAlertContainer.viewWithTag(1001) as? UIButton,
-              let progressOverlay = yesButton.viewWithTag(1002) else {
-            print("❌ Could not find progress overlay")
-            return
-        }
-        
-        print("🎬 Starting progress animation")
-        
-        // Remove all animations first
-        progressOverlay.layer.removeAllAnimations()
-        
-        // Remove existing constraint if any
-        if let existingConstraint = activityProgressConstraint {
-            existingConstraint.isActive = false
-        }
-        
-        // Set initial width to 0
-        activityProgressConstraint = progressOverlay.widthAnchor.constraint(equalToConstant: 0)
-        activityProgressConstraint?.isActive = true
-        yesButton.layoutIfNeeded()  // Force layout immediately
-        
-        print("📏 Button width: \(yesButton.bounds.width)")
-        
-        // Animate width to full button width over 60 seconds
-        activityProgressConstraint?.constant = yesButton.bounds.width
-        
-        UIView.animate(withDuration: 60.0, delay: 0, options: [.curveLinear]) {
-            yesButton.layoutIfNeeded()
-        } completion: { [weak self] finished in
-            if finished {
-                print("⏱️ Progress animation completed naturally")
-            }
-        }
-        
-        print("✅ Progress animation started - 0 to \(yesButton.bounds.width) over 60s")
-    }
-
-    @objc private func activityYesTapped() {
-        print("✅ Activity check - Yes tapped")
-        hideActivityCheck()
-        restartActivityCheckTimer()
-    }
-
-    @objc private func activityNoTapped() {
-        print("⏸️ Activity check - No tapped")
-        hideActivityCheck()
-        pausePlayback()
-    }
-
-    @objc private func activityBackgroundTapped(_ gesture: UITapGestureRecognizer) {
-        let location = gesture.location(in: self)  // Changed to self
-        let alertFrame = activityAlertContainer.frame
-        
-        // Check if tap is outside the alert container (treat as yes)
-        if !alertFrame.contains(location) {
-            print("✅ Activity check - Background tapped outside alert (treating as yes)")
-            hideActivityCheck()
-            restartActivityCheckTimer()
-        } else {
-            print("🔘 Tap inside alert container - ignoring")
-        }
-    }
-    
-    private func hideActivityCheck() {
         activityCountdownTimer?.invalidate()
-        activityCountdownTimer = nil
-        
-        // Stop the animation
-        if let yesButton = activityAlertContainer.viewWithTag(1001) as? UIButton,
-           let progressOverlay = yesButton.viewWithTag(1002) {
-            progressOverlay.layer.removeAllAnimations()
+        activityCountdownTimer = Timer.scheduledTimer(
+            withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.activityTimeRemaining -= 1
+            self.updateActivityProgress(animated: true)
+            if self.activityTimeRemaining <= 0 {
+                self.activityCountdownTimer?.invalidate()
+                self.pausePlayback()
+                self.hideActivityAlert()
+            }
         }
-        
-        // Clean up progress constraint
-        if let progressConstraint = activityProgressConstraint {
-            progressConstraint.isActive = false
-            activityProgressConstraint = nil
-        }
-        
+    }
+
+    private func hideActivityAlert() {
         UIView.animate(withDuration: 0.3) {
             self.activityAlertContainer.alpha = 0
         }
     }
 
-    private func restartActivityCheckTimer() {
-        print("🔄 Restarting activity check timer")
-        
-        // Hide alert if currently showing and stop countdown
-        if activityAlertContainer.alpha > 0 {
-            hideActivityCheck()
-        }
-        
-        // Invalidate existing activity check timer
-        activityCheckTimer?.invalidate()
-        
-        // Start fresh timer
-        activityCheckTimer = Timer.scheduledTimer(withTimeInterval: activityCheckInterval, repeats: false) { [weak self] timer in
-            print("⏱️ TIMER FIRED! Showing activity check")
-            self?.showActivityCheck()
-        }
-        
-        if let timer = activityCheckTimer {
-            RunLoop.main.add(timer, forMode: .common)
-            print("⏱️ Activity check timer restarted - next check in \(activityCheckInterval)s")
+    private func updateActivityProgress(animated: Bool) {
+        guard let yesButton = activityAlertContainer.viewWithTag(1001),
+              let overlay   = activityAlertContainer.viewWithTag(1002) else { return }
+
+        let fraction = CGFloat(activityTimeRemaining) / 60.0
+        let newWidth  = yesButton.bounds.width * fraction
+
+        if animated {
+            UIView.animate(withDuration: 0.9, delay: 0,
+                           options: .curveLinear) {
+                self.activityProgressConstraint?.constant = newWidth
+                overlay.layoutIfNeeded()
+            }
+        } else {
+            activityProgressConstraint?.constant = newWidth
+            overlay.layoutIfNeeded()
         }
     }
 
+    @objc private func activityYesTapped() {
+        activityCountdownTimer?.invalidate()
+        hideActivityAlert()
+        restartActivityCheckTimer()
+    }
+
+    @objc private func activityNoTapped() {
+        activityCountdownTimer?.invalidate()
+        hideActivityAlert()
+        pausePlayback()
+    }
+
+    @objc private func activityBackgroundTapped(_ gesture: UITapGestureRecognizer) {
+        // Taps on the container itself (not buttons) do nothing — prevents
+        // accidental dismissal. Intentionally empty.
+    }
 }
 
 // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+
 extension DelayedCameraView: AVCaptureVideoDataOutputSampleBufferDelegate {
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard isActive, !isPaused else { return }
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard isActive, !isPaused, let buf = videoFileBuffer else { return }
+        buf.appendFrame(sampleBuffer: sampleBuffer) { _ in }
+    }
 
-        videoFileBuffer?.appendFrame(sampleBuffer: sampleBuffer) { [weak self] success in
-            guard let self = self, success else { return }
-
-            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
-            self.metadataLock.lock()
-            let frameIndex = self.frameMetadata.count
-            self.frameMetadata.append((timestamp: timestamp, index: frameIndex))
-
-            let count = self.frameMetadata.count
-            self.metadataLock.unlock()
-
-            if count == 1 {
-                print("🎬 First frame captured to file!")
-                // START THE TIMER HERE - when recording actually begins
-                DispatchQueue.main.async {
-                    self.startRecordingTimer()
-                }
-            } else {
-                let actualFPS = Settings.shared.currentFPS(isFrontCamera: self.isFrontCamera)
-                if count % (actualFPS * 10) == 0 {  // Log every 10 seconds
-                    print("📹 Metadata: \(count) frames (~\(count/actualFPS)s)")
-                }
-            }
-        }
+    func captureOutput(_ output: AVCaptureOutput,
+                       didDrop sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        // Dropped frames during heavy load — acceptable at startup.
     }
 }
 
 // MARK: - UIGestureRecognizerDelegate
+
 extension DelayedCameraView: UIGestureRecognizerDelegate {
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        let location = touch.location(in: timelineContainer)
-        
-        if isClipMode {
-            // Define a "hit zone" for the handles (including a bit of padding for easier grabbing)
-            let handlePadding: CGFloat = 15
-            let leftHitZone = leftTrimHandle.frame.insetBy(dx: -handlePadding, dy: -handlePadding)
-            let rightHitZone = rightTrimHandle.frame.insetBy(dx: -handlePadding, dy: -handlePadding)
-            
-            // If the touch is within the bounds of either handle...
-            if leftHitZone.contains(location) || rightHitZone.contains(location) {
-                // ...and this is the playhead's gesture, return false so the playhead doesn't steal the touch.
-                if gestureRecognizer.view == playheadTouchArea {
-                    return false
-                }
-                // Allow the handle's own gesture to proceed
-                return true
-            }
-            
-            // Otherwise, allow the playhead to be dragged anywhere else on the timeline
-            return gestureRecognizer.view == playheadTouchArea
-        }
-        
-        // Scrubber mode logic
-        return true
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        return false
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
+        return false
     }
 }

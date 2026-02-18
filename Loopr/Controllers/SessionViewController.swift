@@ -333,7 +333,7 @@ class SessionViewController: UIViewController {
         isPaused.toggle()
         
         if isPaused {
-            cameraView.pausePlayback()
+            //cameraView.pausePlayback()
             pauseButton.setTitle("Resume", for: .normal)
         } else {
             //cameraView.resumePlayback()
