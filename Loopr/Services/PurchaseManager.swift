@@ -142,9 +142,18 @@ final class PurchaseManager {
 
     /// Days remaining in the trial (0 if expired).
     func trialDaysRemaining() -> Int {
+        //return 0  // TEMP: force expired for testing - remove before shipping
+        
         let elapsed = Date().timeIntervalSince(trialStartDate())
-        let remaining = kTrialDays - elapsed / 86_400   // 86400 sec/day
-        return max(0, Int(ceil(remaining)))
+        let remaining = kTrialDays - elapsed / 86_400
+        
+        // Round UP remaining partial days (0.01 to 7.99 → 1 to 8)
+        // Then subtract 1 to get days remaining (1 to 7)
+        if remaining > 0 {
+            return min(Int(ceil(remaining)), 7)  // Cap at 7 days max
+        } else {
+            return 0
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────

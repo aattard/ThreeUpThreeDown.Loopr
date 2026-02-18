@@ -1,27 +1,69 @@
 import UIKit
 import StoreKit
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MARK: - PaywallViewController
-// ─────────────────────────────────────────────────────────────────────────────
-// Presented modally (fullScreen) when the user taps PLAY after their trial
-// has expired. Styled to match InfoViewController – black background, white
-// text, same close-button pattern.
-// ─────────────────────────────────────────────────────────────────────────────
-
 class PaywallViewController: UIViewController {
 
-    // Called by HomeViewController to know when to proceed with the session
+    // Called by HomeViewController after successful purchase
     var onUnlocked: (() -> Void)?
+    var showCloseButton: Bool = false
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MARK: - UI Elements
-    // ─────────────────────────────────────────────────────────────────────
+    // MARK: - Feature Carousel Data
+
+    private struct FeatureCard {
+        let icon: String
+        let title: String
+        let description: String
+        let color: UIColor
+    }
+
+    private let purple = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
+
+    private lazy var features: [FeatureCard] = [
+        FeatureCard(
+            icon: "figure.baseball",
+            title: "Instant Replay",
+            description: "Watch every swing play back automatically at your chosen delay — no tapping required between reps.",
+            color: purple
+        ),
+        FeatureCard(
+            icon: "slider.horizontal.below.rectangle",
+            title: "Frame-by-Frame Scrub",
+            description: "Pause and drag through the replay one frame at a time. Spot the exact moment contact breaks down.",
+            color: purple
+        ),
+        FeatureCard(
+            icon: "scissors",
+            title: "Clip & Save",
+            description: "Trim the perfect moment and save it directly to Photos. Share it with athletes or parents in seconds.",
+            color: purple
+        ),
+        FeatureCard(
+            icon: "camera.rotate",
+            title: "Front & Back Camera",
+            description: "Switch between front and back cameras. Set up behind the plate or down the third base line.",
+            color: purple
+        ),
+        FeatureCard(
+            icon: "clock.arrow.circlepath",
+            title: "Adjustable Delay",
+            description: "Choose 5s, 7s, or 10s of delay so your athlete finishes their swing before the replay starts.",
+            color: purple
+        ),
+        FeatureCard(
+            icon: "infinity",
+            title: "Own It Forever",
+            description: "One-time purchase. No subscription. No renewal. Pay once and Loopr is yours on every device you own.",
+            color: purple
+        ),
+    ]
+
+    // MARK: - UI
 
     private let scrollView: UIScrollView = {
         let sv = UIScrollView()
         sv.translatesAutoresizingMaskIntoConstraints = false
         sv.alwaysBounceVertical = true
+        sv.showsVerticalScrollIndicator = false
         return sv
     }()
 
@@ -31,7 +73,6 @@ class PaywallViewController: UIViewController {
         return v
     }()
 
-    // App logo – reuses the same asset as HomeViewController
     private let logoImageView: UIImageView = {
         let iv = UIImageView()
         iv.image = UIImage(named: "inapp-logo")
@@ -52,37 +93,34 @@ class PaywallViewController: UIViewController {
 
     private lazy var subheadlineLabel: UILabel = {
         let l = UILabel()
-        l.font = UIFont.systemFont(ofSize: 18, weight: .regular)
+        l.font = UIFont.systemFont(ofSize: 17, weight: .regular)
         l.textColor = UIColor.lightGray
         l.textAlignment = .center
         l.translatesAutoresizingMaskIntoConstraints = false
         return l
     }()
 
-    // Feature bullet list
-    private let featuresLabel: UILabel = {
-        let l = UILabel()
-        l.numberOfLines = 0
-        l.textAlignment = .center
-        l.textColor = .white
-        l.font = UIFont.systemFont(ofSize: 17)
-
-        let features = """
-        ✓  Delayed video replay for swing analysis
-        ✓  Scrub through your replay frame-by-frame
-        ✓  Clip and save your best swings to Photos
-        ✓  Front & back camera support
-        ✓  Adjustable delay (5s, 7s, 10s)
-        ✓  Smooth pinch-to-zoom
-        ✓  One-time purchase – no subscription
-        ✓  Yours forever, on every device you own
-        """
-        l.text = features
-        l.translatesAutoresizingMaskIntoConstraints = false
-        return l
+    private let carouselCollectionView: UICollectionView = {
+        let layout = UICollectionViewFlowLayout()
+        layout.scrollDirection = .horizontal
+        layout.minimumLineSpacing = 16
+        let cv = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        cv.backgroundColor = .clear
+        cv.showsHorizontalScrollIndicator = false
+        cv.isPagingEnabled = false
+        cv.decelerationRate = .fast
+        cv.translatesAutoresizingMaskIntoConstraints = false
+        return cv
     }()
 
-    // Main purchase CTA – price is injected once the StoreKit product loads
+    private let pageControl: UIPageControl = {
+        let pc = UIPageControl()
+        pc.currentPageIndicatorTintColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
+        pc.pageIndicatorTintColor = UIColor.white.withAlphaComponent(0.3)
+        pc.translatesAutoresizingMaskIntoConstraints = false
+        return pc
+    }()
+
     private let purchaseButton: UIButton = {
         let b = UIButton(type: .system)
         b.setTitle("Loading…", for: .normal)
@@ -91,8 +129,9 @@ class PaywallViewController: UIViewController {
         b.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1.0)
         b.layer.cornerRadius = 12
         b.layer.borderWidth = 1
-        b.layer.borderColor = UIColor.black.withAlphaComponent(1.0).cgColor
+        b.layer.borderColor = UIColor.black.cgColor
         b.clipsToBounds = true
+        b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 32, bottom: 0, right: 32)
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }()
@@ -117,7 +156,6 @@ class PaywallViewController: UIViewController {
         return b
     }()
 
-    // Terms / privacy note required by App Store guidelines
     private let legalLabel: UILabel = {
         let l = UILabel()
         l.text = "Payment is charged to your Apple ID at confirmation of purchase."
@@ -129,7 +167,6 @@ class PaywallViewController: UIViewController {
         return l
     }()
 
-    // Activity spinner shown during purchase / restore
     private let activityIndicator: UIActivityIndicatorView = {
         let ai = UIActivityIndicatorView(style: .large)
         ai.color = .white
@@ -137,11 +174,6 @@ class PaywallViewController: UIViewController {
         ai.translatesAutoresizingMaskIntoConstraints = false
         return ai
     }()
-
-    // Close / dismiss button (top-right, matches InfoViewController)
-    // Hidden if the trial has expired so the user MUST make a decision.
-    // Set showCloseButton = true to allow dismissal (e.g. during active trial).
-    var showCloseButton: Bool = false
 
     private lazy var closeButton: UIButton = {
         let b = UIButton(type: .system)
@@ -155,21 +187,51 @@ class PaywallViewController: UIViewController {
         return b
     }()
 
-    // ─────────────────────────────────────────────────────────────────────
+    // Auto-scroll
+    private var autoScrollTimer: Timer?
+    private var currentPage = 0
+    private let repeatCount = 100
+    private var totalItems: Int { features.count * repeatCount }
+    private let cellID = "FeatureCell"
+
     // MARK: - Lifecycle
-    // ─────────────────────────────────────────────────────────────────────
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
         setupUI()
         refreshPurchaseButton()
+        setupSubheadline()
+    }
 
-        // Set subheadline based on actual access state
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        
+        // Force layout refresh first
+        carouselCollectionView.collectionViewLayout.invalidateLayout()
+        
+        let midOffset = (repeatCount / 2) * features.count
+        carouselCollectionView.scrollToItem(
+            at: IndexPath(item: midOffset, section: 0),
+            at: .centeredHorizontally,
+            animated: false
+        )
+        currentPage = midOffset
+        startAutoScroll()
+    }
+    
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        stopAutoScroll()
+    }
+
+    // MARK: - Setup
+
+    private func setupSubheadline() {
         switch PurchaseManager.shared.accessState {
         case .trial(let days):
-            let dayWord = days == 1 ? "day" : "days"
-            subheadlineLabel.text = "You have \(days) free \(dayWord) remaining."
+            let word = days == 1 ? "day" : "days"
+            subheadlineLabel.text = "You have \(days) free \(word) remaining."
         case .expired:
             subheadlineLabel.text = "Your free trial has ended."
         case .purchased:
@@ -177,11 +239,12 @@ class PaywallViewController: UIViewController {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MARK: - Layout
-    // ─────────────────────────────────────────────────────────────────────
-
     private func setupUI() {
+        carouselCollectionView.dataSource = self
+        carouselCollectionView.delegate = self
+        carouselCollectionView.register(FeatureCarouselCell.self, forCellWithReuseIdentifier: cellID)
+        pageControl.numberOfPages = features.count
+
         view.addSubview(scrollView)
         view.addSubview(activityIndicator)
 
@@ -197,117 +260,120 @@ class PaywallViewController: UIViewController {
 
         scrollView.addSubview(contentView)
         [logoImageView, headlineLabel, subheadlineLabel,
-         featuresLabel, purchaseButton, priceNoteLabel,
+         carouselCollectionView, pageControl,
+         purchaseButton, priceNoteLabel,
          restoreButton, legalLabel].forEach { contentView.addSubview($0) }
 
         NSLayoutConstraint.activate([
-            // Scroll view fills screen
             scrollView.topAnchor.constraint(equalTo: view.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            // Content view
             contentView.topAnchor.constraint(equalTo: scrollView.topAnchor),
             contentView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
             contentView.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
             contentView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
 
-            // Logo
-            logoImageView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 60),
+            logoImageView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 50),
             logoImageView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            logoImageView.widthAnchor.constraint(equalToConstant: 160),
-            logoImageView.heightAnchor.constraint(equalToConstant: 160),
+            logoImageView.widthAnchor.constraint(equalToConstant: 180),
+            logoImageView.heightAnchor.constraint(equalToConstant: 180),
 
-            // Headline
-            headlineLabel.topAnchor.constraint(equalTo: logoImageView.bottomAnchor, constant: 24),
+            headlineLabel.topAnchor.constraint(equalTo: logoImageView.bottomAnchor, constant: 16),
             headlineLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
             headlineLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
 
-            // Subheadline
             subheadlineLabel.topAnchor.constraint(equalTo: headlineLabel.bottomAnchor, constant: 8),
             subheadlineLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
             subheadlineLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
 
-            // Features
-            featuresLabel.topAnchor.constraint(equalTo: subheadlineLabel.bottomAnchor, constant: 36),
-            featuresLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 32),
-            featuresLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -32),
+            // Carousel – full width, fixed 200pt height for cards
+            carouselCollectionView.topAnchor.constraint(equalTo: subheadlineLabel.bottomAnchor, constant: 28),
+            carouselCollectionView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            carouselCollectionView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            carouselCollectionView.heightAnchor.constraint(equalToConstant: 200),  // Fixed 200pt height
 
-            // Purchase button
+            pageControl.topAnchor.constraint(equalTo: carouselCollectionView.bottomAnchor, constant: 8),
+            pageControl.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+
+            purchaseButton.topAnchor.constraint(equalTo: pageControl.bottomAnchor, constant: 28),
             purchaseButton.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            purchaseButton.topAnchor.constraint(equalTo: featuresLabel.bottomAnchor, constant: 44),
             purchaseButton.heightAnchor.constraint(equalToConstant: 56),
 
-            // Price note
             priceNoteLabel.topAnchor.constraint(equalTo: purchaseButton.bottomAnchor, constant: 12),
             priceNoteLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
             priceNoteLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
 
-            // Restore button
-            restoreButton.topAnchor.constraint(equalTo: priceNoteLabel.bottomAnchor, constant: 20),
+            restoreButton.topAnchor.constraint(equalTo: priceNoteLabel.bottomAnchor, constant: 16),
             restoreButton.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
 
-            // Legal
-            legalLabel.topAnchor.constraint(equalTo: restoreButton.bottomAnchor, constant: 24),
+            legalLabel.topAnchor.constraint(equalTo: restoreButton.bottomAnchor, constant: 20),
             legalLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
             legalLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
             legalLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -40),
 
-            // Spinner – centred over the whole view
             activityIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             activityIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor)
         ])
 
         purchaseButton.addTarget(self, action: #selector(purchaseTapped), for: .touchUpInside)
         restoreButton.addTarget(self, action: #selector(restoreTapped), for: .touchUpInside)
-        
-        purchaseButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 32, bottom: 0, right: 32)
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MARK: - Button State
-    // ─────────────────────────────────────────────────────────────────────
+    // MARK: - Auto Scroll
 
-    /// Updates the purchase button title with the real price from StoreKit.
+    private func startAutoScroll() {
+        autoScrollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.scrollToNextCard()
+        }
+    }
+
+    private func stopAutoScroll() {
+        autoScrollTimer?.invalidate()
+        autoScrollTimer = nil
+    }
+
+    private func scrollToNextCard() {
+        let next = currentPage + 1
+        guard next < totalItems else { return }
+        currentPage = next
+        carouselCollectionView.scrollToItem(
+            at: IndexPath(item: currentPage, section: 0),
+            at: .centeredHorizontally,
+            animated: true
+        )
+        pageControl.currentPage = currentPage % features.count
+    }
+
+    // MARK: - Purchase Button
+
     private func refreshPurchaseButton() {
         if let product = PurchaseManager.shared.product {
             purchaseButton.setTitle("Unlock Loopr – \(product.displayPrice)", for: .normal)
-            purchaseButton.isEnabled = true
         } else {
             purchaseButton.setTitle("Unlock Loopr – $1.99", for: .normal)
-            purchaseButton.isEnabled = true  // Still allow tap; StoreKit will surface any error
         }
+        purchaseButton.isEnabled = true
     }
 
     private func setLoading(_ loading: Bool) {
-        if loading {
-            activityIndicator.startAnimating()
-            purchaseButton.isEnabled = false
-            restoreButton.isEnabled = false
-        } else {
-            activityIndicator.stopAnimating()
-            purchaseButton.isEnabled = true
-            restoreButton.isEnabled = true
-        }
+        loading ? activityIndicator.startAnimating() : activityIndicator.stopAnimating()
+        purchaseButton.isEnabled = !loading
+        restoreButton.isEnabled = !loading
     }
 
-    // ─────────────────────────────────────────────────────────────────────
     // MARK: - Actions
-    // ─────────────────────────────────────────────────────────────────────
 
     @objc private func purchaseTapped() {
         print("💳 Purchase tapped")
         setLoading(true)
-
-        // Wire up the success callback before initiating
         PurchaseManager.shared.onPurchaseSuccess = { [weak self] in
             guard let self else { return }
             self.setLoading(false)
             self.showSuccessAndDismiss()
         }
-
         Task {
             do {
                 try await PurchaseManager.shared.purchase()
@@ -324,18 +390,15 @@ class PaywallViewController: UIViewController {
     @objc private func restoreTapped() {
         print("🔄 Restore tapped")
         setLoading(true)
-
         PurchaseManager.shared.onPurchaseSuccess = { [weak self] in
             guard let self else { return }
             self.setLoading(false)
             self.showSuccessAndDismiss()
         }
-
         Task {
             await PurchaseManager.shared.restorePurchases()
             await MainActor.run {
                 self.setLoading(false)
-                // If restore didn't fire onPurchaseSuccess, nothing was found
                 if !PurchaseManager.shared.canStartSession() {
                     self.showError("No previous purchase found for this Apple ID.")
                 }
@@ -347,20 +410,14 @@ class PaywallViewController: UIViewController {
         dismiss(animated: true)
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // MARK: - Post-Purchase Flow
-    // ─────────────────────────────────────────────────────────────────────
-
     private func showSuccessAndDismiss() {
         let alert = UIAlertController(
-            title: "You're all set! ⚾️",
-            message: "Thank you for supporting Loopr. Enjoy your sessions!",
+            title: "You're all set!",
+            message: "Thank you for supporting Loopr. Enjoy training with instant replay for infinite insight!",
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: "Let's go!", style: .default) { [weak self] _ in
-            self?.dismiss(animated: true) {
-                self?.onUnlocked?()
-            }
+            self?.dismiss(animated: true) { self?.onUnlocked?() }
         })
         present(alert, animated: true)
     }
@@ -369,5 +426,149 @@ class PaywallViewController: UIViewController {
         let alert = UIAlertController(title: "Something went wrong", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
+    }
+}
+
+// MARK: - UICollectionViewDataSource
+
+extension PaywallViewController: UICollectionViewDataSource {
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        return totalItems
+    }
+
+    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        let cell = collectionView.dequeueReusableCell(withReuseIdentifier: cellID, for: indexPath) as! FeatureCarouselCell
+        let feature = features[indexPath.item % features.count]
+        cell.configure(icon: feature.icon, title: feature.title, description: feature.description, accentColor: feature.color)
+        return cell
+    }
+}
+
+// MARK: - UICollectionViewDelegateFlowLayout
+
+extension PaywallViewController: UICollectionViewDelegateFlowLayout {
+
+    func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
+        let width: CGFloat = 280
+        let height: CGFloat = 200
+        return CGSize(width: width, height: height)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, insetForSectionAt section: Int) -> UIEdgeInsets {
+        // Calculate inset only if bounds are valid
+        guard carouselCollectionView.bounds.width > 0 else {
+            return UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)
+        }
+        
+        let cardWidth: CGFloat = 280
+        let inset = (carouselCollectionView.bounds.width - cardWidth) / 2
+        return UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+    }
+
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        stopAutoScroll()
+
+        let cardWidth: CGFloat = 280  // Match the card size
+        let spacing: CGFloat = 16
+        let inset = (carouselCollectionView.bounds.width - cardWidth) / 2
+
+        let rawIndex = (targetContentOffset.pointee.x + carouselCollectionView.bounds.width / 2 - inset) / (cardWidth + spacing)
+        let rounded = velocity.x > 0 ? ceil(rawIndex) : (velocity.x < 0 ? floor(rawIndex) : round(rawIndex))
+        let clampedIndex = max(0, min(Int(rounded), totalItems - 1))
+
+        targetContentOffset.pointee.x = CGFloat(clampedIndex) * (cardWidth + spacing) - inset
+        currentPage = clampedIndex
+        pageControl.currentPage = clampedIndex % features.count
+
+        // Restart auto scroll after user settles
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+            self?.startAutoScroll()
+        }
+    }
+}
+
+// MARK: - FeatureCarouselCell
+
+class FeatureCarouselCell: UICollectionViewCell {
+
+    private let iconView: UIImageView = {
+        let iv = UIImageView()
+        iv.contentMode = .scaleAspectFit
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        return iv
+    }()
+
+    private let titleLabel: UILabel = {
+        let l = UILabel()
+        l.font = UIFont.systemFont(ofSize: 18, weight: .bold)
+        l.textColor = .white
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
+
+    private let descLabel: UILabel = {
+        let l = UILabel()
+        l.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+        l.textColor = UIColor.white.withAlphaComponent(0.75)
+        l.numberOfLines = 0
+        l.translatesAutoresizingMaskIntoConstraints = false
+        return l
+    }()
+
+    private let accentBar: UIView = {
+        let v = UIView()
+        v.layer.cornerRadius = 2
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.backgroundColor = UIColor.white.withAlphaComponent(0.07)
+        contentView.layer.cornerRadius = 20
+        contentView.layer.borderWidth = 1
+        contentView.layer.borderColor = UIColor.white.withAlphaComponent(0.1).cgColor
+        contentView.clipsToBounds = true
+
+        contentView.addSubview(accentBar)
+        contentView.addSubview(iconView)
+        contentView.addSubview(titleLabel)
+        contentView.addSubview(descLabel)
+
+        NSLayoutConstraint.activate([
+            // Left accent bar – full height
+            accentBar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            accentBar.topAnchor.constraint(equalTo: contentView.topAnchor),
+            accentBar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            accentBar.widthAnchor.constraint(equalToConstant: 4),
+
+            // Icon — top left, larger since card is square
+            iconView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 24),
+            iconView.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: 20),
+            iconView.widthAnchor.constraint(equalToConstant: 40),
+            iconView.heightAnchor.constraint(equalToConstant: 40),
+
+            // Title below icon
+            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+
+            // Description below title
+            descLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
+            descLabel.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: 20),
+            descLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            descLabel.bottomAnchor.constraint(lessThanOrEqualTo: contentView.bottomAnchor, constant: -20)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(icon: String, title: String, description: String, accentColor: UIColor) {
+        let config = UIImage.SymbolConfiguration(pointSize: 28, weight: .semibold)
+        iconView.image = UIImage(systemName: icon, withConfiguration: config)
+        iconView.tintColor = accentColor
+        titleLabel.text = title
+        descLabel.text = description
+        accentBar.backgroundColor = accentColor
     }
 }

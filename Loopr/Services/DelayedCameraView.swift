@@ -1064,6 +1064,15 @@ class DelayedCameraView: UIView {
     private func saveClipToPhotos() {
         print("📸 Saving clip to Photos...")
 
+        // Check current authorization status first
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+
+        if status == .denied || status == .restricted {
+            // Already denied — show actionable alert immediately
+            showPhotosPermissionAlert()
+            return
+        }
+
         let loadingView = createLoadingView(text: "Saving to Album...")
         addSubview(loadingView)
 
@@ -1078,33 +1087,50 @@ class DelayedCameraView: UIView {
                 return
             }
 
-            // Save to Photos
-            PHPhotoLibrary.requestAuthorization { status in
-                guard status == .authorized else {
-                    DispatchQueue.main.async {
+            // Request authorization (will prompt if notDetermined, skip if already authorized)
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                DispatchQueue.main.async {
+                    guard status == .authorized || status == .limited else {
                         loadingView.removeFromSuperview()
-                        self.showError("Photos access denied. Enable in Settings.")
+                        self.showPhotosPermissionAlert()
+                        return
                     }
-                    return
-                }
 
-                PHPhotoLibrary.shared().performChanges({
-                    PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url)
-                }) { success, error in
-                    DispatchQueue.main.async {
-                        loadingView.removeFromSuperview()
-
-                        if success {
-                            print("✅ Clip saved to Photos")
-                            self.showSuccessFeedback()
-                            self.exitClipMode()
-                        } else {
-                            print("❌ Failed to save: \(error?.localizedDescription ?? "unknown")")
-                            self.showError("Failed to save to Album")
+                    PHPhotoLibrary.shared().performChanges({
+                        PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                    }) { success, error in
+                        DispatchQueue.main.async {
+                            loadingView.removeFromSuperview()
+                            if success {
+                                print("✅ Clip saved to Photos")
+                                self.showSuccessFeedback()
+                                self.exitClipMode()
+                            } else {
+                                print("❌ Failed to save: \(error?.localizedDescription ?? "unknown")")
+                                self.showError("Failed to save to Album")
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    private func showPhotosPermissionAlert() {
+        let alert = UIAlertController(
+            title: "Photos Access Required",
+            message: "Loopr needs permission to save clips to your Photos library. Tap Open Settings, then enable Photos for Loopr.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+        })
+        alert.addAction(UIAlertAction(title: "Not Now", style: .cancel))
+
+        if let viewController = self.window?.rootViewController {
+            viewController.present(alert, animated: true)
         }
     }
 
@@ -1644,7 +1670,8 @@ class DelayedCameraView: UIView {
                 
                 // Add camera icon
                 let config = UIImage.SymbolConfiguration(pointSize: 80, weight: .bold)
-                let imageView = UIImageView(image: UIImage(systemName: "video.fill", withConfiguration: config))
+                //let imageView = UIImageView(image: UIImage(systemName: "video.fill", withConfiguration: config))
+                let imageView = UIImageView(image: UIImage(systemName: "figure.baseball", withConfiguration: config))
                 imageView.tintColor = .white
                 imageView.contentMode = .center
                 imageView.translatesAutoresizingMaskIntoConstraints = false

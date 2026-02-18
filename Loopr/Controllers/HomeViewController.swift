@@ -208,7 +208,12 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             trialBadgeButton.isHidden = false
             let label = days == 1 ? "1 free day left" : "\(days) free days left"
             trialBadgeButton.setTitle(label, for: .normal)
-        case .expired, .purchased:
+            trialBadgeButton.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.85)
+        case .expired:
+            trialBadgeButton.isHidden = false
+            trialBadgeButton.setTitle("Trial Expired", for: .normal)
+            trialBadgeButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.9)
+        case .purchased:
             trialBadgeButton.isHidden = true
         }
     }
@@ -287,7 +292,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
 
             // Trial badge - BOTTOM LEFT above safe area
             trialBadgeButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            trialBadgeButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16)
+            trialBadgeButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -1)
         ])
         
         // Update button states
