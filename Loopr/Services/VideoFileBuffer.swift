@@ -79,6 +79,11 @@ class VideoFileBuffer {
 
     /// The raw-camera CMTime corresponding to t=0 in the composition.
     private(set) var pausedCompositionStartTime: CMTime = .zero
+    
+    /// The composition CMTime corresponding to the pause point —
+    /// i.e. the last frame that was actually displayed to the user.
+    /// Playback and looping must not go beyond this time.
+    private(set) var pausedCompositionEndTime: CMTime = .zero
 
     /// Total number of frames in the composition (for the scrub window).
     private(set) var pausedFrameCount: Int = 0
@@ -103,6 +108,7 @@ class VideoFileBuffer {
     private let maxDurationSeconds: Int
     /// Half the window — each file holds this many seconds before rotation.
     private let halfWindowSeconds: Int
+    private let delaySeconds: Int
     let fps: Int
     private let writeQueue: DispatchQueue
 
@@ -120,6 +126,7 @@ class VideoFileBuffer {
         self.maxDurationSeconds = maxDurationSeconds
         self.halfWindowSeconds  = max(30, maxDurationSeconds / 2)
         self.fps                = fps
+        self.delaySeconds       = delaySeconds
         self.writeQueue         = writeQueue
         self.ciContext          = ciContext
         self.maxCacheSize       = (delaySeconds + 3) * fps
@@ -438,6 +445,25 @@ class VideoFileBuffer {
                 self.pausedComposition          = comp
                 self.pausedCompositionStartTime = compStartTime
                 self.pausedFrameCount           = frameCount
+
+                // ── NEW: calculate the composition time of the pause point ──
+                // segEndTime is the raw camera time of the last appended frame.
+                // The pause point is (segEndTime - delaySeconds worth of frames)
+                // mapped into composition time.
+                if let comp = comp {
+                    let pausePointRaw = CMTimeSubtract(
+                        segEndTime,
+                        CMTime(seconds: Double(self.delaySeconds), preferredTimescale: 600))
+                    let pausePointCompositionTime = CMTimeSubtract(pausePointRaw, compStartTime)
+                    // Clamp to valid composition range.
+                    self.pausedCompositionEndTime = CMTimeMinimum(
+                        CMTimeMaximum(pausePointCompositionTime, .zero),
+                        comp.duration)
+                    print("⏸ Composition end time (pause point): " +
+                          "\(CMTimeGetSeconds(self.pausedCompositionEndTime))s of " +
+                          "\(CMTimeGetSeconds(comp.duration))s total")
+                }
+
                 let item = comp.map { AVPlayerItem(asset: $0) }
                 DispatchQueue.main.async { completion(item, comp) }
             }
