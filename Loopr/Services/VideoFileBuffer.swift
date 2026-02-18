@@ -44,7 +44,8 @@ class VideoFileBuffer {
         // PHASE 1 OPTIMIZED:
         // - Keep full 60 seconds for SCRUBBING (when paused)
         // - Use actual FPS to calculate cache size
-        self.maxCacheSize = 60 * fps  // 60 seconds worth of frames at actual FPS
+        //self.maxCacheSize = 60 * fps  // 60 seconds worth of frames at actual FPS
+        self.maxCacheSize = (60 + delaySeconds) * fps
         
         let tempDir = fileManager.temporaryDirectory
         self.currentFileURL = tempDir.appendingPathComponent("buffer_main.mp4")
