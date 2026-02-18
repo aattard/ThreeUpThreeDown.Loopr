@@ -84,6 +84,13 @@ class DelayedCameraView: UIView {
     // MARK: - Display
 
     private var currentDisplayFrameIndex: Int = 0
+    
+    private func formatTime(_ seconds: Float) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        let frac = Int((seconds - Float(Int(seconds))) * 100)
+        return String(format: "%02d:%02d.%02d", mins, secs, frac)
+    }
 
     // MARK: - Config
 
@@ -673,7 +680,7 @@ class DelayedCameraView: UIView {
             timeLabel.trailingAnchor.constraint(
                 equalTo: clipSaveButton.leadingAnchor, constant: -5),
             timeLabel.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
-            timeLabel.widthAnchor.constraint(equalToConstant: 50),
+            timeLabel.widthAnchor.constraint(equalToConstant: 75),
 
             timelineContainer.leadingAnchor.constraint(
                 equalTo: playPauseButton.trailingAnchor, constant: 20),
@@ -925,11 +932,15 @@ class DelayedCameraView: UIView {
                      toleranceAfter:  .zero) { [weak self] finished in
             guard let self, self.isLooping, finished else { return }
 
-            // Re-arm the end time AFTER seek, BEFORE play — this is critical.
-            // forwardPlaybackEndTime is consumed when the item reaches it;
-            // it must be reset each loop iteration or play stops immediately.
+            // Re-arm end time for the correct mode
             if let item = self.player?.currentItem {
-                item.forwardPlaybackEndTime = buf.pausedCompositionEndTime
+                if self.isClipMode {
+                    item.forwardPlaybackEndTime =
+                        buf.compositionTime(forFrameIndex: self.clipEndIndex)
+                        ?? buf.pausedCompositionEndTime
+                } else {
+                    item.forwardPlaybackEndTime = buf.pausedCompositionEndTime
+                }
             }
 
             self.player?.play()
@@ -985,7 +996,8 @@ class DelayedCameraView: UIView {
             scrubberPosition = min(max(frameIdx, oldest), pausePt)
             updateScrubberPlayheadPosition()
             let secs = Float(scrubberPosition - oldest) / Float(fps)
-            timeLabel.text = String(format: "%05.2f", secs)
+            //timeLabel.text = String(format: "%05.2f", secs)
+            timeLabel.text = formatTime(secs)
         }
     }
 
@@ -1110,7 +1122,8 @@ class DelayedCameraView: UIView {
         updateScrubberPlayheadPosition()
 
         let secs = Float(scrubberPosition - oldest) / Float(actualFPS)
-        timeLabel.text = String(format: "%05.2f", secs)
+        //timeLabel.text = String(format: "%05.2f", secs)
+        timeLabel.text = formatTime(secs)
 
         // Seek the player (coalesced — never stacks).
         seekPlayer(toFrameIndex: scrubberPosition)
@@ -1174,7 +1187,8 @@ class DelayedCameraView: UIView {
 
             let oldest = self.oldestAllowedIndex()
             let secs   = Float(self.scrubberPosition - oldest) / Float(actualFPS)
-            self.timeLabel.text = String(format: "%05.2f", secs)
+            //self.timeLabel.text = String(format: "%05.2f", secs)
+            timeLabel.text = formatTime(secs)
 
             print("⏸ Paused — scrubberPosition: \(self.scrubberPosition), " +
                   "totalFrames: \(totalFrames)")
@@ -1616,6 +1630,13 @@ class DelayedCameraView: UIView {
         updateClipHandlePositions()
         updatePlayheadPosition()
         updateTimeLabel()
+        
+        // Arm the player end time to the clip end, not the full pause point
+        if let item = player?.currentItem {
+            item.forwardPlaybackEndTime =
+                videoFileBuffer?.compositionTime(forFrameIndex: clipEndIndex)
+                ?? buf.pausedCompositionEndTime
+        }
     }
 
     @objc private func cancelClipTapped() {
@@ -1631,7 +1652,8 @@ class DelayedCameraView: UIView {
         let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
         let oldest    = oldestAllowedIndex()
         let secs      = Float(scrubberPosition - oldest) / Float(actualFPS)
-        timeLabel.text = String(format: "%05.2f", secs)
+        //timeLabel.text = String(format: "%05.2f", secs)
+        timeLabel.text = formatTime(secs)
     }
 
     private func exitClipModeClean() {
@@ -1654,6 +1676,11 @@ class DelayedCameraView: UIView {
             self.scrubberBackground.alpha      = 1
             self.scrubberPlayhead.alpha        = 1
             self.cancelClipButton.isHidden     = true
+        }
+        
+        // Restore end time to full scrub window boundary
+        if let item = player?.currentItem, let buf = videoFileBuffer {
+            item.forwardPlaybackEndTime = buf.pausedCompositionEndTime
         }
     }
 
@@ -1721,7 +1748,8 @@ class DelayedCameraView: UIView {
         guard isClipMode else { return }
         let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
         let t = Float(clipPlayheadPosition - clipStartIndex) / Float(actualFPS)
-        timeLabel.text = String(format: "%05.2f", t)
+        //timeLabel.text = String(format: "%05.2f", t)
+        timeLabel.text = formatTime(t)
     }
 
     // MARK: - Trim handle gestures
@@ -1823,8 +1851,16 @@ class DelayedCameraView: UIView {
         if gesture.state == .ended || gesture.state == .cancelled {
             isDraggingHandle = false
             seekPlayer(toFrameIndex: clipPlayheadPosition)
+
+            // Update player end time to match new clip end
+            if let item = player?.currentItem, let buf = videoFileBuffer {
+                item.forwardPlaybackEndTime =
+                    buf.compositionTime(forFrameIndex: clipEndIndex)
+                    ?? buf.pausedCompositionEndTime
+            }
+
             UIView.animate(withDuration: 0.3) {
-                self.clipPlayhead.alpha     = 1
+                self.clipPlayhead.alpha      = 1
                 self.playheadTouchArea.alpha = 1
             }
         }
