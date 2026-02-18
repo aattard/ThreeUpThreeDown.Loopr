@@ -1922,125 +1922,149 @@ class DelayedCameraView: UIView {
     // MARK: - Clip export
 
     private func createClipVideo(completion: @escaping (URL?) -> Void) {
-        guard let videoFileBuffer else { completion(nil); return }
+        guard let videoFileBuffer,
+              let composition = videoFileBuffer.pausedComposition else {
+            print("❌ createClipVideo: no composition available")
+            completion(nil)
+            return
+        }
 
         let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("swingclip_\(Date().timeIntervalSince1970).mp4")
+            .appendingPathComponent("swingclip_\(Int(Date().timeIntervalSince1970)).mp4")
         try? FileManager.default.removeItem(at: outputURL)
 
-        guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp4) else {
-            completion(nil); return
-        }
-
-        let rotationAngle = previewLayer?.connection?.videoRotationAngle ?? 0
         let actualFPS     = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let isRotated     = rotationAngle == 90 || rotationAngle == 270
-        let videoW        = isRotated ? 1080 : 1920
-        let videoH        = isRotated ? 1920 : 1080
+        let rotationAngle = previewLayer?.connection?.videoRotationAngle ?? 0
 
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey:  AVVideoCodecType.h264,
-            AVVideoWidthKey:  videoW,
-            AVVideoHeightKey: videoH,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey:          videoW * videoH * 11,
-                AVVideoProfileLevelKey:            AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoExpectedSourceFrameRateKey: actualFPS,
-                AVVideoMaxKeyFrameIntervalKey:     actualFPS
-            ]
-        ]
-
-        let writerInput = AVAssetWriterInput(
-            mediaType: .video, outputSettings: videoSettings)
-        writerInput.expectsMediaDataInRealTime = false
-
-        let srcAttrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey  as String: videoW,
-            kCVPixelBufferHeightKey as String: videoH
-        ]
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: writerInput, sourcePixelBufferAttributes: srcAttrs)
-
-        guard writer.canAdd(writerInput) else { completion(nil); return }
-        writer.add(writerInput)
-        writer.startWriting()
-        writer.startSession(atSourceTime: .zero)
-
-        // Use AVAssetExportSession on the composition for the clip range.
-        // This is far more reliable than frame-by-frame extraction.
-        guard let composition = videoFileBuffer.pausedComposition else {
-            completion(nil); return
+        // Determine natural render size from the composition track itself.
+        // This respects whatever resolution was actually recorded.
+        let naturalSize: CGSize
+        if let track = composition.tracks(withMediaType: .video).first {
+            let size = track.naturalSize
+            // If the track itself is already rotated (portrait), size.width < size.height.
+            naturalSize = size
+        } else {
+            naturalSize = CGSize(width: 1920, height: 1080)
         }
 
-        let startTime = videoFileBuffer.compositionTime(forFrameIndex: clipStartIndex) ?? .zero
-        let endTime   = videoFileBuffer.compositionTime(forFrameIndex: clipEndIndex)
-                        ?? composition.duration
+        // Output size: portrait recordings need width/height swapped so the
+        // exported file is upright without relying on a metadata transform.
+        let isPortrait = rotationAngle == 90 || rotationAngle == 270
+        let renderSize = isPortrait
+            ? CGSize(width: naturalSize.height, height: naturalSize.width)
+            : naturalSize
+
+        print("📐 Export renderSize: \(renderSize), rotationAngle: \(rotationAngle), " +
+              "isFrontCamera: \(isFrontCamera)")
+
+        // Choose a preset compatible with the composition.
+        // Prefer passthrough (no re-encode) but fall back to quality presets.
+        let candidatePresets = AVAssetExportSession.exportPresets(compatibleWith: composition)
+        print("📦 Compatible presets: \(candidatePresets)")
+
+        // For clips we always re-encode so the rotation bake-in works correctly.
+        // Pick the highest quality preset that's compatible.
+        let preferredPresets = [
+            AVAssetExportPreset1920x1080,
+            AVAssetExportPreset1280x720,
+            AVAssetExportPresetHighestQuality,
+            AVAssetExportPresetMediumQuality
+        ]
+        let chosenPreset = preferredPresets.first { candidatePresets.contains($0) }
+                           ?? AVAssetExportPresetMediumQuality
+
+        print("📦 Using export preset: \(chosenPreset)")
 
         guard let exporter = AVAssetExportSession(
-            asset: composition,
-            presetName: AVAssetExportPreset1920x1080) else {
-            completion(nil); return
+            asset: composition, presetName: chosenPreset) else {
+            print("❌ Could not create AVAssetExportSession")
+            completion(nil)
+            return
         }
 
         exporter.outputURL      = outputURL
         exporter.outputFileType = .mp4
-        exporter.timeRange      = CMTimeRange(start: startTime, end: endTime)
 
-        // Apply orientation transform via video composition.
-        let videoComposition = AVMutableVideoComposition(
-            propertiesOf: composition)
-        videoComposition.renderSize = CGSize(width: videoW, height: videoH)
+        // Clip time range within the composition.
+        let startTime = videoFileBuffer.compositionTime(forFrameIndex: clipStartIndex) ?? .zero
+        let endTime   = videoFileBuffer.compositionTime(forFrameIndex: clipEndIndex)
+                        ?? composition.duration
+        exporter.timeRange = CMTimeRange(start: startTime, end: endTime)
+
+        // Build the video composition to bake in orientation + front-camera mirror.
+        // The instruction must cover the FULL composition duration (not just the clip
+        // range) — the exporter's timeRange property handles the actual trim.
+        guard let compVideoTrack = composition.tracks(withMediaType: .video).first else {
+            print("❌ No video track in composition")
+            completion(nil)
+            return
+        }
+
+        let videoComposition          = AVMutableVideoComposition()
+        videoComposition.renderSize   = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(actualFPS))
 
-        // Build a simple passthrough instruction with the right transform.
-        if let compTrack = composition.tracks(withMediaType: .video).first {
-            let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: startTime, end: endTime)
-            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
+        let instruction       = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, end: composition.duration)
 
-            var transform = CGAffineTransform.identity
-            let rad = CGFloat(rotationAngle) * .pi / 180.0
-            transform = transform.rotated(by: rad)
-            // Translate back into positive frame after rotation.
-            switch rotationAngle {
-            case 90:
-                transform = transform.translatedBy(x: 0, y: -CGFloat(videoH))
-            case 180:
-                transform = transform.translatedBy(x: -CGFloat(videoW), y: -CGFloat(videoH))
-            case 270:
-                transform = transform.translatedBy(x: -CGFloat(videoW), y: 0)
-            default:
-                break
-            }
-            if isFrontCamera {
-                // Mirror horizontally: flip on the vertical axis after rotation.
-                transform = transform.scaledBy(x: -1, y: 1)
-                switch rotationAngle {
-                case 90:
-                    transform = transform.translatedBy(x: -CGFloat(videoW), y: 0)
-                case 270:
-                    transform = transform.translatedBy(x: CGFloat(videoW), y: 0)
-                case 180:
-                    transform = transform.translatedBy(x: CGFloat(videoW * 2), y: 0)
-                default:
-                    transform = transform.translatedBy(x: -CGFloat(videoW), y: 0)
-                }
-            }
+        let layerInstruction  = AVMutableVideoCompositionLayerInstruction(
+            assetTrack: compVideoTrack)
 
-            layerInstruction.setTransform(transform, at: .zero)
-            instruction.layerInstructions = [layerInstruction]
-            videoComposition.instructions = [instruction]
+        // Build the affine transform to rotate and optionally mirror.
+        // We bake rotation into the pixel data so the file is self-contained
+        // (no hidden metadata transform that some players ignore).
+        var transform = CGAffineTransform.identity
+
+        switch rotationAngle {
+        case 90:
+            // Rotate 90° CW: (x,y) → (y, -x), translate back into positive quadrant.
+            transform = CGAffineTransform(rotationAngle: .pi / 2)
+                .translatedBy(x: 0, y: -naturalSize.width)
+        case 180:
+            transform = CGAffineTransform(rotationAngle: .pi)
+                .translatedBy(x: -naturalSize.width, y: -naturalSize.height)
+        case 270:
+            // Rotate 90° CCW.
+            transform = CGAffineTransform(rotationAngle: -.pi / 2)
+                .translatedBy(x: -naturalSize.height, y: 0)
+        default:
+            transform = .identity
         }
+
+        if isFrontCamera {
+            // Mirror horizontally in the rotated coordinate space.
+            // After rotation the render frame is renderSize wide, so we flip
+            // on the vertical axis (negate x, translate by renderWidth).
+            let mirror = CGAffineTransform(scaleX: -1, y: 1)
+                .translatedBy(x: -renderSize.width, y: 0)
+            transform = transform.concatenating(mirror)
+        }
+
+        layerInstruction.setTransform(transform, at: .zero)
+        instruction.layerInstructions = [layerInstruction]
+        videoComposition.instructions  = [instruction]
 
         exporter.videoComposition = videoComposition
 
+        print("⏳ Starting export: clipStart=\(CMTimeGetSeconds(startTime))s, " +
+              "clipEnd=\(CMTimeGetSeconds(endTime))s, " +
+              "duration=\(CMTimeGetSeconds(endTime - startTime))s")
+
         exporter.exportAsynchronously {
             DispatchQueue.main.async {
-                if exporter.status == .completed {
+                switch exporter.status {
+                case .completed:
+                    print("✅ Export completed: \(outputURL.lastPathComponent)")
                     completion(outputURL)
-                } else {
+                case .failed:
                     print("❌ Export failed: \(exporter.error?.localizedDescription ?? "unknown")")
+                    print("❌ Export error detail: \(exporter.error.debugDescription)")
+                    completion(nil)
+                case .cancelled:
+                    print("⚠️ Export cancelled")
+                    completion(nil)
+                default:
+                    print("⚠️ Export unexpected status: \(exporter.status.rawValue)")
                     completion(nil)
                 }
             }
