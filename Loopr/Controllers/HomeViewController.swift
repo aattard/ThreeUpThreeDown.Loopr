@@ -42,12 +42,14 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     private let controlsStackView: UIStackView = {
         let stack = UIStackView()
         stack.axis = .horizontal
-        stack.spacing = 20
-        stack.distribution = .fill
+        stack.spacing = 12
+        stack.distribution = .equalSpacing
+        stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
         return stack
     }()
     
+    // Circular icon-only button for camera flip
     private let flipButton: UIButton = {
         let button = UIButton(type: .system)
         let config = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
@@ -56,33 +58,62 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         button.tintColor = .white
         button.backgroundColor = UIColor.black.withAlphaComponent(0.6)
         button.layer.cornerRadius = 25
+        button.clipsToBounds = true
         button.translatesAutoresizingMaskIntoConstraints = false
+        // Resist stretching in the stack view
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
     }()
     
-    private let zoomButton: UIButton = {
+    // Pill: 🔍 magnifyingglass + zoom value
+    private let zoomButton: UIButton = makePillButton(
+        icon: "magnifyingglass",
+        title: "1.0×"
+    )
+    
+    // Pill: ⏱ timer + delay value (e.g. "7s")
+    private let delayButton: UIButton = makePillButton(
+        icon: "timer",
+        title: "7s"
+    )
+    
+    // Pill: ⏺ record.circle + buffer duration (e.g. "1m")
+    private let bufferButton: UIButton = makePillButton(
+        icon: "record.circle",
+        title: "1m"
+    )
+    
+    // ─────────────────────────────────────────────────────────────────────
+    // MARK: - Pill Button Factory
+    // ─────────────────────────────────────────────────────────────────────
+
+    private static func makePillButton(icon: String, title: String) -> UIButton {
         let button = UIButton(type: .system)
-        button.setTitle("1.0x", for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        
+        // Icon
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
+        let image = UIImage(systemName: icon, withConfiguration: iconConfig)
+        button.setImage(image, for: .normal)
+        
+        // Label
+        button.setTitle(" \(title)", for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        
+        button.tintColor = .white
         button.setTitleColor(.white, for: .normal)
         button.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        button.layer.cornerRadius = 25
+        
+        // Pill shape: same height as flip button, wider via padding
+        button.contentEdgeInsets = UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
+        button.layer.cornerRadius = 25   // pill = height/2 (height is 50)
+        button.clipsToBounds = true
         button.translatesAutoresizingMaskIntoConstraints = false
         return button
-    }()
-    
-    private let delayButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.setTitle("7s", for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
-        button.setTitleColor(.white, for: .normal)
-        button.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        button.layer.cornerRadius = 25
-        button.translatesAutoresizingMaskIntoConstraints = false
-        return button
-    }()
-    
-    // Info button - positioned in top right (like close button toggle)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // MARK: - Info Button
     private let infoButton: UIButton = {
         let button = UIButton(type: .system)
         let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)
@@ -240,6 +271,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         controlsStackView.addArrangedSubview(flipButton)
         controlsStackView.addArrangedSubview(zoomButton)
         controlsStackView.addArrangedSubview(delayButton)
+        controlsStackView.addArrangedSubview(bufferButton)
         view.addSubview(controlsStackView)
         
         // Info button - standalone in top right
@@ -256,6 +288,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         flipButton.addTarget(self, action: #selector(flipCameraTapped), for: .touchUpInside)
         zoomButton.addTarget(self, action: #selector(zoomButtonTapped), for: .touchUpInside)
         delayButton.addTarget(self, action: #selector(delayButtonTapped), for: .touchUpInside)
+        bufferButton.addTarget(self, action: #selector(bufferButtonTapped), for: .touchUpInside)
         infoButton.addTarget(self, action: #selector(infoButtonTapped), for: .touchUpInside)
         trialBadgeButton.addTarget(self, action: #selector(trialBadgeTapped), for: .touchUpInside)
         
@@ -276,13 +309,14 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             controlsStackView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             controlsStackView.bottomAnchor.constraint(equalTo: startButton.topAnchor, constant: -30),
             
-            // Individual button sizes (in stack)
+            // Flip button stays circular (icon-only)
             flipButton.widthAnchor.constraint(equalToConstant: 50),
             flipButton.heightAnchor.constraint(equalToConstant: 50),
-            zoomButton.widthAnchor.constraint(equalToConstant: 50),
+            
+            // Pill buttons: same height as flip button, width auto-sizes to content
             zoomButton.heightAnchor.constraint(equalToConstant: 50),
-            delayButton.widthAnchor.constraint(equalToConstant: 50),
             delayButton.heightAnchor.constraint(equalToConstant: 50),
+            bufferButton.heightAnchor.constraint(equalToConstant: 50),
             
             // Info button - TOP RIGHT
             infoButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
@@ -298,6 +332,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         // Update button states
         updateDelayButton()
         updateZoomButton()
+        updateBufferButton()
         
         // Zoom callback
         cameraPreviewView.onZoomChanged = { [weak self] zoom in
@@ -426,14 +461,25 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     @objc private func zoomButtonTapped() {
         print("🔍 Zoom button tapped - showing zoom controls")
         
-        let alert = UIAlertController(title: "Zoom Level", message: nil, preferredStyle: .actionSheet)
-        let zoomLevels: [CGFloat] = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+        let currentZoom = Settings.shared.currentZoomFactor(isFrontCamera: Settings.shared.useFrontCamera)
+        
+        let alert = UIAlertController(
+            title: "Zoom Level",
+            message: "Crop in without moving the camera",
+            preferredStyle: .actionSheet
+        )
+        
+        let zoomLevels: [CGFloat] = [1.0, 2.0, 3.0, 4.0, 5.0]
         
         for zoom in zoomLevels {
-            let action = UIAlertAction(title: String(format: "%.1fx", zoom), style: .default) { [weak self] _ in
+            let title = String(format: "%.1f×", zoom)
+            let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
                 Settings.shared.setZoomFactor(zoom, isFrontCamera: Settings.shared.useFrontCamera)
                 self?.cameraPreviewView.setZoom(zoom)
                 self?.updateZoomButton()
+            }
+            if abs(currentZoom - zoom) < 0.01 {
+                action.setValue(true, forKey: "checked")
             }
             alert.addAction(action)
         }
@@ -443,6 +489,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         if let popover = alert.popoverPresentationController {
             popover.sourceView = zoomButton
             popover.sourceRect = zoomButton.bounds
+            popover.permittedArrowDirections = .down
         }
         
         present(alert, animated: true)
@@ -451,14 +498,29 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     @objc private func delayButtonTapped() {
         print("⏱️ Delay button tapped")
         
-        let alert = UIAlertController(title: "Playback Delay", message: nil, preferredStyle: .actionSheet)
-        let delays = [5, 7, 10]
+        let currentDelay = Settings.shared.playbackDelay
         
-        for delay in delays {
+        let alert = UIAlertController(
+            title: "Playback Delay",
+            message: "How far behind live the preview plays",
+            preferredStyle: .actionSheet
+        )
+        
+        // (seconds, isRecommended)
+        let delays: [(Int, Bool)] = [(5, false), (7, true), (10, false)]
+        
+        for (delay, recommended) in delays {
             let action = UIAlertAction(title: "\(delay) seconds", style: .default) { [weak self] _ in
                 Settings.shared.playbackDelay = delay
                 self?.updateDelayButton()
                 print("⏱️ Delay changed to: \(delay)s")
+            }
+            if delay == currentDelay {
+                action.setValue(true, forKey: "checked")
+            }
+            if recommended {
+                let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
+                action.setValue(starImage, forKey: "image")
             }
             alert.addAction(action)
         }
@@ -468,6 +530,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         if let popover = alert.popoverPresentationController {
             popover.sourceView = delayButton
             popover.sourceRect = delayButton.bounds
+            popover.permittedArrowDirections = .down
         }
         
         present(alert, animated: true)
@@ -510,12 +573,57 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
 
     private func updateDelayButton() {
         let currentDelay = Settings.shared.playbackDelay
-        delayButton.setTitle("\(currentDelay)s", for: .normal)
+        delayButton.setTitle(" \(currentDelay)s", for: .normal)
     }
     
     private func updateZoomButton() {
         let currentZoom = Settings.shared.currentZoomFactor(isFrontCamera: Settings.shared.useFrontCamera)
-        zoomButton.setTitle(String(format: "%.1fx", currentZoom), for: .normal)
+        zoomButton.setTitle(String(format: " %.1f×", currentZoom), for: .normal)
+    }
+    
+    private func updateBufferButton() {
+        let minutes = Settings.shared.bufferDurationSeconds / 60
+        bufferButton.setTitle(" \(minutes)m", for: .normal)
+    }
+    
+    @objc private func bufferButtonTapped() {
+        print("⏺ Buffer duration button tapped")
+        
+        let alert = UIAlertController(
+            title: "Review Buffer",
+            message: "How much video to keep available for replay",
+            preferredStyle: .actionSheet
+        )
+        
+        // (minutes, isRecommended)
+        let options: [(Int, Bool)] = [(1, true), (2, true), (3, false), (4, false), (5, false)]
+        
+        for (minutes, recommended) in options {
+            let title = "\(minutes) \(minutes == 1 ? "minute" : "minutes")"
+            let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
+                Settings.shared.bufferDurationSeconds = minutes * 60
+                self?.updateBufferButton()
+                print("⏺ Buffer duration changed to: \(minutes)m (\(minutes * 60)s)")
+            }
+            if minutes * 60 == Settings.shared.bufferDurationSeconds {
+                action.setValue(true, forKey: "checked")
+            }
+            if recommended {
+                let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
+                action.setValue(starImage, forKey: "image")
+            }
+            alert.addAction(action)
+        }
+        
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        
+        if let popover = alert.popoverPresentationController {
+            popover.sourceView = bufferButton
+            popover.sourceRect = bufferButton.bounds
+            popover.permittedArrowDirections = .down
+        }
+        
+        present(alert, animated: true)
     }
 }
 

@@ -9,6 +9,7 @@ class Settings {
     private let keyBufferDuration = "bufferDuration"
     private let keyCameraSelection = "cameraSelection"
     
+    private let keyBufferDurationSeconds = "bufferDurationSeconds"
     private let keyBackCameraZoom = "backCameraZoom"
     private let keyFrontCameraZoom = "frontCameraZoom"
     private let keyBackCameraFPS = "backCameraFPS"
@@ -34,6 +35,18 @@ class Settings {
         }
     }
     
+    /// Buffer duration in seconds (user selects 1–5 minutes; stored as seconds).
+    /// Default: 60 seconds (1 minute).
+    var bufferDurationSeconds: Int {
+        get {
+            let value = defaults.integer(forKey: keyBufferDurationSeconds)
+            return value == 0 ? 60 : value
+        }
+        set {
+            defaults.set(newValue, forKey: keyBufferDurationSeconds)
+        }
+    }
+
     var useFrontCamera: Bool {
         get {
             return defaults.bool(forKey: keyCameraSelection)

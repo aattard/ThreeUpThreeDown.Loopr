@@ -94,7 +94,10 @@ class DelayedCameraView: UIView {
 
     // MARK: - Config
 
-    private let scrubDurationSeconds: Int = 300
+    //private let scrubDurationSeconds: Int = 300
+    private var scrubDurationSeconds: Int {
+        Settings.shared.bufferDurationSeconds
+    }
     private let handleWidth: CGFloat      = 20
     private lazy var captureQueue = DispatchQueue(
         label: "com.loopr.capture", qos: .userInteractive)
@@ -1333,7 +1336,8 @@ class DelayedCameraView: UIView {
                 camera.unlockForConfiguration()
             } catch { print("❌ Camera config error: \(error)") }
 
-            let maxDuration = 300 + self.delaySeconds + 10
+            //let maxDuration = 300 + self.delaySeconds + 10
+            let maxDuration = Settings.shared.bufferDurationSeconds + self.delaySeconds + 10
             self.videoFileBuffer = VideoFileBuffer(
                 maxDurationSeconds: maxDuration,
                 delaySeconds:       self.delaySeconds,
