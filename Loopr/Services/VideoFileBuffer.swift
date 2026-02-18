@@ -8,10 +8,10 @@ import UIKit
 // Architecture (rewritten):
 //
 //  Recording:
-//   • Two alternating files (buffer_main.mp4 / buffer_alt.mp4), each capped
-//     at half the rolling window (150 s by default).  On rotation the old
-//     file is *kept* until the next rotation so a pause can always compose
-//     both halves into a full 300-s asset.
+//   • Three alternating files (buffer_main.mp4 / buffer_alt.mp4 / buffer_prev.mp4),
+//     each capped at half the rolling window (150 s by default).  On rotation the
+//     previous two files are kept so a pause can always compose up to 450 s of
+//     footage, trimmed to the 300 s window.
 //
 //  Live-delay display:
 //   • recentFramesCache — a UIImage ring buffer covering only
@@ -19,12 +19,9 @@ import UIKit
 //     Used exclusively by DelayedCameraView.captureOutput for the live feed.
 //
 //  Pause / scrub / playback:
-//   • At pause time we build an AVMutableComposition that stitches the
-//     previous segment (if any) + current segment together, then hand an
-//     AVPlayer-ready asset back to the caller.
+//   • At pause time we build an AVMutableComposition that stitches up to three
+//     segments together, then hand an AVPlayer-ready asset back to the caller.
 //   • Scrubbing calls player.seek(to:toleranceBefore:toleranceAfter:).
-//     No AVAssetImageGenerator, no generateCGImagesAsynchronously, no
-//     manual cancel races.
 //   • Playback is plain AVPlayer.play() / pause() / seek().
 //
 //  Frame index ↔ CMTime mapping:
@@ -38,63 +35,50 @@ class VideoFileBuffer {
 
     // MARK: - Types
 
-    /// One recorded segment: a file URL + the wall-clock time span it covers.
     struct Segment {
         let fileURL: URL
-        let startTime: CMTime   // raw camera time of first frame in this file
-        let endTime: CMTime     // raw camera time of last appended frame
+        let startTime: CMTime
+        let endTime: CMTime
     }
 
     // MARK: - Private state — writer
 
     private var currentWriter: AVAssetWriter?
     private var currentWriterInput: AVAssetWriterInput?
-    private var isWritingToMainFile = true
 
-    private var currentFileURL: URL
-    private var alternateFileURL: URL
+    /// 0 = buffer_main, 1 = buffer_alt, 2 = buffer_prev — cycles 0→1→2→0
+    private var currentFileIndex: Int = 0
+
+    private var fileURLs: [URL] = []
     private let fileManager = FileManager.default
 
-    // Raw camera timestamp of the first frame written to the current file.
     private var fileStartTime: CMTime?
-    // Raw camera timestamp of the most-recently appended frame.
     private var lastAppendedTime: CMTime = .zero
 
-    private var frameCount: Int = 0          // frames in current file
-    private var globalFrameCount: Int = 0    // total frames ever appended
+    private var frameCount: Int = 0
+    private var globalFrameCount: Int = 0
 
     private var isPaused = false
 
     // MARK: - Private state — segments
 
-    /// Up to two segments kept alive for the rolling window.
-    /// [0] = older half, [1] = newer half (current).
+    /// Up to three segments kept alive for the rolling window.
     private var segments: [Segment] = []
 
     // MARK: - Private state — pause / playback
 
-    /// AVMutableComposition built once at pause time.
-    /// Covers up to `maxDurationSeconds` of footage from the two segments.
     private(set) var pausedComposition: AVMutableComposition?
-
-    /// The raw-camera CMTime corresponding to t=0 in the composition.
     private(set) var pausedCompositionStartTime: CMTime = .zero
-    
-    /// The composition CMTime corresponding to the pause point —
-    /// i.e. the last frame that was actually displayed to the user.
-    /// Playback and looping must not go beyond this time.
+    private(set) var pausedCompositionDisplayStartTime: CMTime = .zero
     private(set) var pausedCompositionEndTime: CMTime = .zero
-
-    /// Total number of frames in the composition (for the scrub window).
     private(set) var pausedFrameCount: Int = 0
 
     // MARK: - Private state — timestamps
 
-    /// Raw camera presentation timestamps, one per global frame.
-    /// Used to convert a frame index to a composition seek time.
     private var frameTimestamps: [CMTime] = []
     private let timestampLock = NSLock()
     private let maxTimestampCount: Int
+    private var prunedFrameCount: Int = 0
 
     // MARK: - Private state — live-delay cache
 
@@ -106,13 +90,10 @@ class VideoFileBuffer {
     // MARK: - Configuration
 
     private let maxDurationSeconds: Int
-    /// Half the window — each file holds this many seconds before rotation.
     private let halfWindowSeconds: Int
     private let delaySeconds: Int
     let fps: Int
     private let writeQueue: DispatchQueue
-
-    /// Shared CIContext from the caller — avoids per-frame GPU context alloc.
     private let ciContext: CIContext
 
     // MARK: - Init
@@ -133,18 +114,31 @@ class VideoFileBuffer {
         self.maxTimestampCount  = maxDurationSeconds * fps
 
         let tmp = FileManager.default.temporaryDirectory
-        self.currentFileURL   = tmp.appendingPathComponent("buffer_main.mp4")
-        self.alternateFileURL = tmp.appendingPathComponent("buffer_alt.mp4")
+        self.fileURLs = [
+            tmp.appendingPathComponent("buffer_main.mp4"),
+            tmp.appendingPathComponent("buffer_alt.mp4"),
+            tmp.appendingPathComponent("buffer_prev.mp4")
+        ]
 
         print("📁 VideoFileBuffer init — window: \(maxDurationSeconds)s, " +
               "halfWindow: \(halfWindowSeconds)s, fps: \(fps), " +
               "cacheSize: \(maxCacheSize)")
     }
 
+    // MARK: - Active file URL
+
+    private var activeFileURL: URL {
+        fileURLs[currentFileIndex]
+    }
+
+    func getCurrentFileURL() -> URL? {
+        activeFileURL
+    }
+
     // MARK: - Writer setup
 
     func startWriting(videoSettings: [String: Any], isInitialStart: Bool = false) throws {
-        let fileURL = isWritingToMainFile ? currentFileURL : alternateFileURL
+        let fileURL = activeFileURL
         try? fileManager.removeItem(at: fileURL)
 
         let writer = try AVAssetWriter(outputURL: fileURL, fileType: .mp4)
@@ -174,11 +168,13 @@ class VideoFileBuffer {
 
             cacheLock.lock()
             recentFramesCache.removeAll()
-            cacheStartIndex   = 0
-            globalFrameCount  = 0
+            cacheStartIndex  = 0
+            globalFrameCount = 0
+            prunedFrameCount = 0
             cacheLock.unlock()
 
             segments.removeAll()
+            currentFileIndex = 0
             print("✅ Started writing (INITIAL) → \(fileURL.lastPathComponent)")
         } else {
             print("✅ Rotated → \(fileURL.lastPathComponent)  " +
@@ -199,15 +195,13 @@ class VideoFileBuffer {
 
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-        // ── First frame of this file ──────────────────────────────────────
         if fileStartTime == nil {
             fileStartTime = presentationTime
         }
 
-        // ── Half-window rotation ──────────────────────────────────────────
         let elapsed = CMTimeGetSeconds(presentationTime - (fileStartTime ?? .zero))
         if elapsed >= Double(halfWindowSeconds) {
-            rotateToAlternateFile(
+            rotateToNextFile(
                 videoSettings: writerInput.outputSettings as? [String: Any],
                 segmentEndTime: presentationTime)
             completion(false)
@@ -219,12 +213,11 @@ class VideoFileBuffer {
             return
         }
 
-        // ── Normalise timestamp to file-local time ────────────────────────
         let normalizedTime = CMTimeSubtract(presentationTime, fileStartTime ?? .zero)
         var timing = CMSampleTimingInfo(
-            duration:               CMSampleBufferGetDuration(sampleBuffer),
-            presentationTimeStamp:  normalizedTime,
-            decodeTimeStamp:        .invalid)
+            duration:              CMSampleBufferGetDuration(sampleBuffer),
+            presentationTimeStamp: normalizedTime,
+            decodeTimeStamp:       .invalid)
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let formatDesc  = CMSampleBufferGetFormatDescription(sampleBuffer) else {
@@ -234,11 +227,11 @@ class VideoFileBuffer {
 
         var newSB: CMSampleBuffer?
         let status = CMSampleBufferCreateReadyWithImageBuffer(
-            allocator:        kCFAllocatorDefault,
-            imageBuffer:      pixelBuffer,
+            allocator:         kCFAllocatorDefault,
+            imageBuffer:       pixelBuffer,
             formatDescription: formatDesc,
-            sampleTiming:     &timing,
-            sampleBufferOut:  &newSB)
+            sampleTiming:      &timing,
+            sampleBufferOut:   &newSB)
 
         guard status == noErr, let normalizedSB = newSB else {
             completion(false)
@@ -255,6 +248,7 @@ class VideoFileBuffer {
             frameTimestamps.append(presentationTime)
             if frameTimestamps.count > maxTimestampCount {
                 frameTimestamps.removeFirst()
+                prunedFrameCount += 1
             }
             timestampLock.unlock()
 
@@ -273,7 +267,6 @@ class VideoFileBuffer {
 
         let original = UIImage(cgImage: cgImage)
 
-        // Scale down to 800 px on the long edge for memory efficiency.
         let maxDim: CGFloat = 800
         let scale = min(maxDim / original.size.width,
                         maxDim / original.size.height, 1.0)
@@ -314,32 +307,30 @@ class VideoFileBuffer {
 
     // MARK: - File rotation
 
-    private func rotateToAlternateFile(videoSettings: [String: Any]?,
-                                       segmentEndTime: CMTime) {
-        let oldURL       = isWritingToMainFile ? currentFileURL : alternateFileURL
+    private func rotateToNextFile(videoSettings: [String: Any]?,
+                                  segmentEndTime: CMTime) {
+        let oldURL       = activeFileURL
         let oldStartTime = fileStartTime ?? .zero
 
-        // Save a completed-segment record.
-        // We keep only the two most recent segments (rolling window).
         let completedSegment = Segment(fileURL:   oldURL,
                                        startTime: oldStartTime,
                                        endTime:   segmentEndTime)
-        if segments.count >= 2 {
-            // The oldest segment's file is about to be overwritten — safe to drop.
+        // Keep up to 3 segments for a full 300 s window
+        if segments.count >= 3 {
             segments.removeFirst()
         }
         segments.append(completedSegment)
 
-        // Prune timestamps so only the two-segment window survives.
         pruneTimestampsToWindow(windowStart: segments.first?.startTime ?? oldStartTime)
 
         currentWriterInput?.markAsFinished()
         let oldWriter      = currentWriter
-        let oldWriterInput = currentWriterInput   // keep alive until finishWriting returns
+        let oldWriterInput = currentWriterInput
         currentWriter      = nil
         currentWriterInput = nil
 
-        isWritingToMainFile.toggle()
+        // Advance to next file slot (0→1→2→0)
+        currentFileIndex = (currentFileIndex + 1) % 3
 
         if let settings = videoSettings {
             do {
@@ -350,7 +341,7 @@ class VideoFileBuffer {
         }
 
         oldWriter?.finishWriting { [weak self] in
-            _ = oldWriterInput  // retain until here
+            _ = oldWriterInput
             if oldWriter?.status == .completed {
                 print("✅ Segment finalized: \(oldURL.lastPathComponent)")
             } else {
@@ -360,39 +351,34 @@ class VideoFileBuffer {
         }
     }
 
-    /// Remove any temp files that no longer correspond to a live segment.
     private func cleanupExpiredSegmentFiles() {
         let activeURLs = Set(segments.map { $0.fileURL })
-        for candidate in [currentFileURL, alternateFileURL] {
+        for candidate in fileURLs {
             if !activeURLs.contains(candidate) {
-                // Only remove if this file isn't the *current* write target.
-                let isCurrent = (isWritingToMainFile && candidate == currentFileURL) ||
-                                (!isWritingToMainFile && candidate == alternateFileURL)
-                if !isCurrent {
-                    try? fileManager.removeItem(at: candidate)
-                }
+                // Don't delete the file currently being written to
+                guard candidate != activeFileURL else { continue }
+                try? fileManager.removeItem(at: candidate)
             }
         }
     }
 
-    /// Trim frameTimestamps so they only cover `windowStart` onwards.
     private func pruneTimestampsToWindow(windowStart: CMTime) {
         timestampLock.lock()
         defer { timestampLock.unlock() }
-        // Binary search for the first timestamp >= windowStart.
         var lo = 0, hi = frameTimestamps.count
         while lo < hi {
             let mid = (lo + hi) / 2
             if CMTimeCompare(frameTimestamps[mid], windowStart) < 0 { lo = mid + 1 }
             else { hi = mid }
         }
-        if lo > 0 { frameTimestamps.removeFirst(lo) }
+        if lo > 0 {
+            frameTimestamps.removeFirst(lo)
+            prunedFrameCount += lo
+        }
     }
 
     // MARK: - Pause
 
-    /// Finalise the current write, build the playback composition, and call
-    /// back with the ready-to-use AVPlayerItem (on the main queue).
     func pauseRecording(completion: @escaping (AVPlayerItem?, AVMutableComposition?) -> Void) {
         guard !isPaused, let writer = currentWriter else {
             if let comp = pausedComposition {
@@ -414,7 +400,7 @@ class VideoFileBuffer {
         isPaused = true
         let segEndTime   = lastAppendedTime
         let segStartTime = fileStartTime ?? .zero
-        let currentURL   = isWritingToMainFile ? currentFileURL : alternateFileURL
+        let currentURL   = activeFileURL
 
         currentWriterInput?.markAsFinished()
         writer.finishWriting { [weak self] in
@@ -431,7 +417,8 @@ class VideoFileBuffer {
             let currentSegment = Segment(fileURL:   currentURL,
                                          startTime: segStartTime,
                                          endTime:   segEndTime)
-            if self.segments.count >= 2 { self.segments.removeFirst() }
+            // Keep up to 3 segments
+            if self.segments.count >= 3 { self.segments.removeFirst() }
             self.segments.append(currentSegment)
 
             print("📼 Segments at pause: \(self.segments.count)")
@@ -446,22 +433,23 @@ class VideoFileBuffer {
                 self.pausedCompositionStartTime = compStartTime
                 self.pausedFrameCount           = frameCount
 
-                // ── NEW: calculate the composition time of the pause point ──
-                // segEndTime is the raw camera time of the last appended frame.
-                // The pause point is (segEndTime - delaySeconds worth of frames)
-                // mapped into composition time.
                 if let comp = comp {
                     let pausePointRaw = CMTimeSubtract(
                         segEndTime,
                         CMTime(seconds: Double(self.delaySeconds), preferredTimescale: 600))
                     let pausePointCompositionTime = CMTimeSubtract(pausePointRaw, compStartTime)
-                    // Clamp to valid composition range.
                     self.pausedCompositionEndTime = CMTimeMinimum(
                         CMTimeMaximum(pausePointCompositionTime, .zero),
                         comp.duration)
-                    print("⏸ Composition end time (pause point): " +
-                          "\(CMTimeGetSeconds(self.pausedCompositionEndTime))s of " +
-                          "\(CMTimeGetSeconds(comp.duration))s total")
+
+                    // ── NEW: start of displayed content = end - scrub window ──
+                    let displayStartTime = CMTimeSubtract(
+                        self.pausedCompositionEndTime,
+                        CMTime(seconds: Double(self.maxDurationSeconds), preferredTimescale: 600))
+                    self.pausedCompositionDisplayStartTime = CMTimeMaximum(displayStartTime, .zero)
+
+                    print("⏸ Display window: \(CMTimeGetSeconds(self.pausedCompositionDisplayStartTime))s " +
+                          "→ \(CMTimeGetSeconds(self.pausedCompositionEndTime))s")
                 }
 
                 let item = comp.map { AVPlayerItem(asset: $0) }
@@ -469,13 +457,9 @@ class VideoFileBuffer {
             }
         }
     }
-    
+
     // MARK: - Composition building
 
-    /// Stitch up to two segments into one AVMutableComposition covering at
-    /// most `maxDurationSeconds` of the most-recent footage.
-    ///
-    /// Returns (composition, rawCameraTimeOfCompositionStart, frameCount).
     private func buildComposition() -> (AVMutableComposition?, CMTime, Int) {
         guard !segments.isEmpty else { return (nil, .zero, 0) }
 
@@ -502,15 +486,17 @@ class VideoFileBuffer {
             var assetTrack: AVAssetTrack?
 
             asset.loadValuesAsynchronously(forKeys: ["tracks", "duration"]) {
-                var error: NSError?
-                let status = asset.statusOfValue(forKey: "tracks", error: &error)
-                if status == .loaded {
-                    assetTrack = asset.tracks(withMediaType: .video).first
-                } else {
-                    print("⚠️ Tracks failed to load for \(seg.fileURL.lastPathComponent): " +
-                          "\(error?.localizedDescription ?? "?")")
+                DispatchQueue.global(qos: .userInitiated).async {
+                    var error: NSError?
+                    let status = asset.statusOfValue(forKey: "tracks", error: &error)
+                    if status == .loaded {
+                        assetTrack = asset.tracks(withMediaType: .video).first
+                    } else {
+                        print("⚠️ Tracks failed to load for \(seg.fileURL.lastPathComponent): " +
+                              "\(error?.localizedDescription ?? "?")")
+                    }
+                    semaphore.signal()
                 }
-                semaphore.signal()
             }
             semaphore.wait()
 
@@ -526,7 +512,7 @@ class VideoFileBuffer {
                 continue
             }
 
-            let segRawDuration  = CMTimeSubtract(seg.endTime, seg.startTime)
+            let segRawDuration = CMTimeSubtract(seg.endTime, seg.startTime)
             let clipStartInFile: CMTime
             if CMTimeCompare(seg.startTime, windowStart) < 0 {
                 let rawOffset  = CMTimeSubtract(windowStart, seg.startTime)
@@ -553,7 +539,8 @@ class VideoFileBuffer {
                         CMTimeMultiplyByFloat64(clipStartInFile, multiplier: scale))
                     firstSegment = false
                 }
-                insertCursor = CMTimeAdd(insertCursor, CMTimeSubtract(fileDuration, clipStartInFile))
+                insertCursor = CMTimeAdd(insertCursor,
+                    CMTimeSubtract(fileDuration, clipStartInFile))
                 print("✅ Inserted \(seg.fileURL.lastPathComponent): " +
                       "\(String(format: "%.2f", CMTimeGetSeconds(clipStartInFile)))s → " +
                       "\(String(format: "%.2f", fileDurationSecs))s")
@@ -580,13 +567,12 @@ class VideoFileBuffer {
 
     // MARK: - Frame index → composition CMTime
 
-    /// Convert a global frame index to a CMTime suitable for
-    /// `player.seek(to:)` against the paused composition.
     func compositionTime(forFrameIndex index: Int) -> CMTime? {
         timestampLock.lock()
         defer { timestampLock.unlock() }
-        guard index >= 0 && index < frameTimestamps.count else { return nil }
-        let raw = frameTimestamps[index]
+        let arrayIndex = index - prunedFrameCount
+        guard arrayIndex >= 0 && arrayIndex < frameTimestamps.count else { return nil }
+        let raw = frameTimestamps[arrayIndex]
         let t   = CMTimeSubtract(raw, pausedCompositionStartTime)
         guard CMTimeGetSeconds(t) >= 0 else { return nil }
         return t
@@ -606,10 +592,6 @@ class VideoFileBuffer {
         timestampLock.lock()
         defer { timestampLock.unlock() }
         return frameTimestamps.count
-    }
-
-    func getCurrentFileURL() -> URL? {
-        isWritingToMainFile ? currentFileURL : alternateFileURL
     }
 
     // MARK: - Cleanup
@@ -639,11 +621,12 @@ class VideoFileBuffer {
         recentFramesCache.removeAll()
         cacheStartIndex  = 0
         globalFrameCount = 0
+        prunedFrameCount = 0
         cacheLock.unlock()
 
         segments.removeAll()
 
-        for url in [currentFileURL, alternateFileURL] {
+        for url in fileURLs {
             try? fileManager.removeItem(at: url)
         }
 
@@ -654,8 +637,11 @@ class VideoFileBuffer {
         isPaused           = false
         pausedComposition  = nil
         pausedCompositionStartTime = .zero
-        pausedFrameCount   = 0
+        pausedCompositionEndTime   = .zero
+        pausedFrameCount           = 0
+        currentFileIndex           = 0
     }
 
     deinit { cleanup() }
 }
+

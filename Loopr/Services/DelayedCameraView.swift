@@ -924,25 +924,24 @@ class DelayedCameraView: UIView {
     private func loopBackToStart() {
         guard let buf = videoFileBuffer else { return }
 
-        let loopStartIndex = isClipMode ? clipStartIndex : oldestAllowedIndex()
-        let loopStartTime  = buf.compositionTime(forFrameIndex: loopStartIndex) ?? .zero
+        let loopStartTime: CMTime
+        if isClipMode {
+            loopStartTime = buf.compositionTime(forFrameIndex: clipStartIndex) ?? .zero
+        } else {
+            // Start of the displayed scrub window, not raw composition t=0
+            loopStartTime = buf.pausedCompositionDisplayStartTime
+        }
 
         player?.seek(to: loopStartTime,
                      toleranceBefore: .zero,
                      toleranceAfter:  .zero) { [weak self] finished in
             guard let self, self.isLooping, finished else { return }
-
-            // Re-arm end time for the correct mode
             if let item = self.player?.currentItem {
-                if self.isClipMode {
-                    item.forwardPlaybackEndTime =
-                        buf.compositionTime(forFrameIndex: self.clipEndIndex)
-                        ?? buf.pausedCompositionEndTime
-                } else {
-                    item.forwardPlaybackEndTime = buf.pausedCompositionEndTime
-                }
+                item.forwardPlaybackEndTime = self.isClipMode
+                    ? (buf.compositionTime(forFrameIndex: self.clipEndIndex)
+                       ?? buf.pausedCompositionEndTime)
+                    : buf.pausedCompositionEndTime
             }
-
             self.player?.play()
         }
     }
@@ -972,31 +971,43 @@ class DelayedCameraView: UIView {
     /// scrubber UI and the scrubberPosition index.
     private func playerDidAdvance(to time: CMTime, duration: CMTime) {
         guard isLooping, let buf = videoFileBuffer else { return }
-        let ts = buf.getFrameTimestamps()
-        guard !ts.isEmpty else { return }
 
-        let rawTime = CMTimeAdd(time, buf.pausedCompositionStartTime)
-        var lo = 0, hi = ts.count - 1
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2
-            if CMTimeCompare(ts[mid], rawTime) <= 0 { lo = mid } else { hi = mid - 1 }
-        }
-
-        let fps      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let oldest   = oldestAllowedIndex()
-        // Clamp display to pause point — never show past it
-        let pausePt  = max(1, buf.getTimestampCount() - (delaySeconds * fps))
-        let frameIdx = min(lo, pausePt)
+        let fps        = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
+        let requiredFrames = delaySeconds * fps
+        let pausePoint = max(0, totalFrames - requiredFrames)
+        let oldest     = oldestAllowedIndex()
+        let scrubRange = max(1, pausePoint - oldest)
 
         if isClipMode {
-            clipPlayheadPosition = min(max(frameIdx, clipStartIndex), clipEndIndex)
+            // Clip mode: map composition time fraction onto clip range
+            let clipRange = max(1, clipEndIndex - clipStartIndex)
+            let endSecs   = CMTimeGetSeconds(
+                buf.compositionTime(forFrameIndex: clipEndIndex) ?? duration)
+            let startSecs = CMTimeGetSeconds(
+                buf.compositionTime(forFrameIndex: clipStartIndex) ?? .zero)
+            let rangeSecs = max(0.001, endSecs - startSecs)
+            let fraction  = (CMTimeGetSeconds(time) - startSecs) / rangeSecs
+            clipPlayheadPosition = clipStartIndex +
+                min(Int(fraction * Double(clipRange)), clipRange)
             updatePlayheadPosition()
             updateTimeLabel()
         } else {
-            scrubberPosition = min(max(frameIdx, oldest), pausePt)
+            // Scrub mode: map composition time directly onto scrubber range.
+            // This avoids the frameTimestamps binary search which is unreliable
+            // after pruning — the delay buffer frames sit at the start of the
+            // array and cause the scrubber to stall for delaySeconds at loop start.
+            let displayStart = CMTimeGetSeconds(buf.pausedCompositionDisplayStartTime)
+            let displayEnd   = CMTimeGetSeconds(buf.pausedCompositionEndTime)
+            let displayRange = max(0.001, displayEnd - displayStart)
+            let fraction     = (CMTimeGetSeconds(time) - displayStart) / displayRange
+            let clamped      = max(0.0, min(fraction, 1.0))
+
+            scrubberPosition = oldest + Int(clamped * Double(scrubRange))
+            scrubberPosition = min(scrubberPosition, pausePoint)
+
             updateScrubberPlayheadPosition()
             let secs = Float(scrubberPosition - oldest) / Float(fps)
-            //timeLabel.text = String(format: "%05.2f", secs)
             timeLabel.text = formatTime(secs)
         }
     }
@@ -1047,16 +1058,33 @@ class DelayedCameraView: UIView {
             setupPlayer(with: item, composition: comp)
         }
 
-        // Seek to current position before playing
-        let startIndex = isClipMode ? clipPlayheadPosition : scrubberPosition
-        guard let compositionTime = buf.compositionTime(forFrameIndex: startIndex) else {
-            player?.play()
-            return
-        }
-
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
         let half = CMTime(value: 1, timescale: CMTimeScale(fps * 2))
-        player?.seek(to: compositionTime,
+
+        // ── Ratio-based seek — avoids compositionTime() index/prune issues ──
+        // Map scrubberPosition as a fraction of the scrub range directly onto
+        // the composition duration, which is what the scrub bar visually represents.
+        let startTime: CMTime
+        if isClipMode {
+            startTime = buf.compositionTime(forFrameIndex: clipPlayheadPosition) ?? .zero
+        } else {
+            let endTime     = CMTimeGetSeconds(buf.pausedCompositionEndTime)
+            let totalFrames = buf.getTimestampCount()
+            let requiredFrames = delaySeconds * fps
+            let pausePoint  = max(0, totalFrames - requiredFrames)
+            let scrubBack   = min(scrubDurationSeconds * fps, pausePoint)
+            let oldest      = max(0, pausePoint - scrubBack)
+            let scrubRange  = max(1, pausePoint - oldest)
+
+            let fraction    = Double(scrubberPosition - oldest) / Double(scrubRange)
+            let displayDuration = CMTimeGetSeconds(buf.pausedCompositionEndTime)
+                                - CMTimeGetSeconds(buf.pausedCompositionDisplayStartTime)
+            let seekSeconds = CMTimeGetSeconds(buf.pausedCompositionDisplayStartTime)
+                            + (displayDuration * max(0.0, min(fraction, 1.0)))
+            startTime = CMTime(seconds: seekSeconds, preferredTimescale: 600)
+        }
+
+        player?.seek(to: startTime,
                      toleranceBefore: half,
                      toleranceAfter:  half) { [weak self] _ in
             guard let self, self.isLooping else { return }
@@ -1131,20 +1159,20 @@ class DelayedCameraView: UIView {
 
     private func updateScrubberPlayheadPosition() {
         guard let buf = videoFileBuffer else { return }
-        let actualFPS     = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames   = buf.getTimestampCount()
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
         let requiredFrames = delaySeconds * actualFPS
         guard totalFrames > requiredFrames else { return }
 
-        let pausePoint    = totalFrames - requiredFrames
-        let oldest        = oldestAllowedIndex()
-        let scrubRange    = pausePoint - oldest
+        let pausePoint = totalFrames - requiredFrames
+        let oldest     = oldestAllowedIndex()
+        let scrubRange = pausePoint - oldest
         guard scrubRange > 0 else { return }
 
         let timelineWidth = timelineContainer.bounds.width
         guard timelineWidth > 0 else { return }
 
-        let clamped   = max(oldest, min(scrubberPosition, pausePoint - 1))
+        let clamped    = max(oldest, min(scrubberPosition, pausePoint - 1))
         let normalized = CGFloat(clamped - oldest) / CGFloat(scrubRange)
         let playheadX  = normalized * timelineWidth
 
@@ -1153,11 +1181,13 @@ class DelayedCameraView: UIView {
         scrubberTouchAreaConstraint?.constant = touchX
         timelineContainer.layoutIfNeeded()
     }
-
+    
     // MARK: - Pause playback (live → paused)
 
     private func pausePlayback() {
         guard !isPaused, isShowingDelayed else { return }
+
+        captureSession?.stopRunning()
         isPaused = true
         displayTimer?.invalidate(); displayTimer = nil
 
@@ -1172,10 +1202,10 @@ class DelayedCameraView: UIView {
                 return
             }
 
-            let totalFrames   = self.videoFileBuffer?.getTimestampCount() ?? 0
+            let totalFrames    = self.videoFileBuffer?.getTimestampCount() ?? 0
             let requiredFrames = self.delaySeconds * actualFPS
-            let pausePoint = max(1, totalFrames - requiredFrames)
-            self.scrubberPosition = max(1, pausePoint - 1)
+            let pausePoint     = max(0, totalFrames - requiredFrames)
+            self.scrubberPosition = max(0, pausePoint - 1)
 
             self.setupPlayer(with: item, composition: composition)
             self.seekPlayer(toFrameIndex: self.scrubberPosition)
@@ -1187,11 +1217,12 @@ class DelayedCameraView: UIView {
 
             let oldest = self.oldestAllowedIndex()
             let secs   = Float(self.scrubberPosition - oldest) / Float(actualFPS)
-            //self.timeLabel.text = String(format: "%05.2f", secs)
-            timeLabel.text = formatTime(secs)
+            self.timeLabel.text = self.formatTime(secs)
 
             print("⏸ Paused — scrubberPosition: \(self.scrubberPosition), " +
-                  "totalFrames: \(totalFrames)")
+                  "totalFrames: \(totalFrames), " +
+                  "pausePoint: \(pausePoint), " +
+                  "oldest: \(oldest)")
         }
     }
 
@@ -1199,13 +1230,13 @@ class DelayedCameraView: UIView {
 
     private func oldestAllowedIndex() -> Int {
         guard let buf = videoFileBuffer else { return 0 }
-        let actualFPS  = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let actualFPS      = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames    = buf.getTimestampCount()
         let requiredFrames = delaySeconds * actualFPS
         guard totalFrames > requiredFrames else { return 0 }
-        let pausePoint  = totalFrames - requiredFrames
-        let scrubBack   = scrubDurationSeconds * actualFPS
-        return max(1, pausePoint - scrubBack)
+        let pausePoint = totalFrames - requiredFrames
+        let scrubBack  = scrubDurationSeconds * actualFPS
+        return max(0, pausePoint - scrubBack)
     }
 
     // MARK: - Orientation
