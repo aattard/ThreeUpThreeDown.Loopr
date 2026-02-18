@@ -388,7 +388,6 @@ class VideoFileBuffer {
     /// back with the ready-to-use AVPlayerItem (on the main queue).
     func pauseRecording(completion: @escaping (AVPlayerItem?, AVMutableComposition?) -> Void) {
         guard !isPaused, let writer = currentWriter else {
-            // Already paused — return existing composition.
             if let comp = pausedComposition {
                 let item = AVPlayerItem(asset: comp)
                 DispatchQueue.main.async { completion(item, comp) }
@@ -398,45 +397,53 @@ class VideoFileBuffer {
             return
         }
 
+        let minimumFrames = fps * 1
+        guard frameCount >= minimumFrames else {
+            print("⚠️ pauseRecording: only \(frameCount) frames, need \(minimumFrames)")
+            DispatchQueue.main.async { completion(nil, nil) }
+            return
+        }
+
         isPaused = true
-        let segEndTime = lastAppendedTime
+        let segEndTime   = lastAppendedTime
         let segStartTime = fileStartTime ?? .zero
-        let currentURL = isWritingToMainFile ? currentFileURL : alternateFileURL
+        let currentURL   = isWritingToMainFile ? currentFileURL : alternateFileURL
 
         currentWriterInput?.markAsFinished()
         writer.finishWriting { [weak self] in
-            guard let self = self else {
+            guard let self else {
                 DispatchQueue.main.async { completion(nil, nil) }
                 return
             }
-
             guard writer.status == .completed else {
                 print("❌ Writer failed at pause: \(writer.error?.localizedDescription ?? "?")")
                 DispatchQueue.main.async { completion(nil, nil) }
                 return
             }
 
-            // Add the just-finished segment.
             let currentSegment = Segment(fileURL:   currentURL,
                                          startTime: segStartTime,
                                          endTime:   segEndTime)
             if self.segments.count >= 2 { self.segments.removeFirst() }
             self.segments.append(currentSegment)
 
-            // Build the composition on a background queue.
+            print("📼 Segments at pause: \(self.segments.count)")
+            for (i, s) in self.segments.enumerated() {
+                let dur = CMTimeGetSeconds(s.endTime) - CMTimeGetSeconds(s.startTime)
+                print("  [\(i)] \(s.fileURL.lastPathComponent) — \(String(format: "%.2f", dur))s")
+            }
+
             DispatchQueue.global(qos: .userInitiated).async {
                 let (comp, compStartTime, frameCount) = self.buildComposition()
                 self.pausedComposition          = comp
                 self.pausedCompositionStartTime = compStartTime
                 self.pausedFrameCount           = frameCount
-                print("✅ Composition ready — \(frameCount) frames, " +
-                      "duration: \(CMTimeGetSeconds(comp?.duration ?? .zero))s")
                 let item = comp.map { AVPlayerItem(asset: $0) }
                 DispatchQueue.main.async { completion(item, comp) }
             }
         }
     }
-
+    
     // MARK: - Composition building
 
     /// Stitch up to two segments into one AVMutableComposition covering at
@@ -446,20 +453,17 @@ class VideoFileBuffer {
     private func buildComposition() -> (AVMutableComposition?, CMTime, Int) {
         guard !segments.isEmpty else { return (nil, .zero, 0) }
 
-        let comp  = AVMutableComposition()
+        let comp = AVMutableComposition()
         guard let track = comp.addMutableTrack(
-            withMediaType:       .video,
-            preferredTrackID:    kCMPersistentTrackID_Invalid) else {
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid) else {
             return (nil, .zero, 0)
         }
 
-        let maxWindow = CMTime(seconds: Double(maxDurationSeconds), preferredTimescale: 600)
+        let maxWindow    = CMTime(seconds: Double(maxDurationSeconds), preferredTimescale: 600)
         var insertCursor = CMTime.zero
-
-        // Work through segments oldest-first, but only include footage that
-        // falls within the last `maxDurationSeconds`.
-        let allEnd   = segments.last!.endTime
-        let windowStart = CMTimeSubtract(allEnd, maxWindow)
+        let allEnd       = segments.last!.endTime
+        let windowStart  = CMTimeSubtract(allEnd, maxWindow)
 
         var compositionOriginRawTime = CMTime.zero
         var firstSegment = true
@@ -467,49 +471,84 @@ class VideoFileBuffer {
         for seg in segments {
             let asset = AVURLAsset(url: seg.fileURL,
                                    options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
-            guard let assetTrack = asset.tracks(withMediaType: .video).first else {
-                print("⚠️ No video track in \(seg.fileURL.lastPathComponent)")
+
+            let semaphore  = DispatchSemaphore(value: 0)
+            var assetTrack: AVAssetTrack?
+
+            asset.loadValuesAsynchronously(forKeys: ["tracks", "duration"]) {
+                var error: NSError?
+                let status = asset.statusOfValue(forKey: "tracks", error: &error)
+                if status == .loaded {
+                    assetTrack = asset.tracks(withMediaType: .video).first
+                } else {
+                    print("⚠️ Tracks failed to load for \(seg.fileURL.lastPathComponent): " +
+                          "\(error?.localizedDescription ?? "?")")
+                }
+                semaphore.signal()
+            }
+            semaphore.wait()
+
+            guard let videoTrack = assetTrack else {
+                print("⚠️ Skipping \(seg.fileURL.lastPathComponent) — no video track")
                 continue
             }
 
-            // The file's local time of the trim start.
-            let clipStart: CMTime
-            if CMTimeCompare(seg.startTime, windowStart) < 0 {
-                // This segment starts before the window — trim its beginning.
-                let trimOffset = CMTimeSubtract(windowStart, seg.startTime)
-                clipStart = trimOffset
-            } else {
-                clipStart = .zero
+            let fileDuration     = videoTrack.timeRange.duration
+            let fileDurationSecs = CMTimeGetSeconds(fileDuration)
+            guard fileDurationSecs > 0.1 else {
+                print("⚠️ Skipping \(seg.fileURL.lastPathComponent) — too short: \(fileDurationSecs)s")
+                continue
             }
 
-            let fileLocalEnd = CMTimeSubtract(seg.endTime, seg.startTime)
-            guard CMTimeCompare(clipStart, fileLocalEnd) < 0 else { continue }
+            let segRawDuration  = CMTimeSubtract(seg.endTime, seg.startTime)
+            let clipStartInFile: CMTime
+            if CMTimeCompare(seg.startTime, windowStart) < 0 {
+                let rawOffset  = CMTimeSubtract(windowStart, seg.startTime)
+                let rawDurSecs = CMTimeGetSeconds(segRawDuration)
+                let scale      = rawDurSecs > 0 ? (fileDurationSecs / rawDurSecs) : 1.0
+                clipStartInFile = CMTimeMinimum(
+                    CMTimeMultiplyByFloat64(rawOffset, multiplier: scale), fileDuration)
+            } else {
+                clipStartInFile = .zero
+            }
 
-            let timeRange = CMTimeRange(start: clipStart, end: fileLocalEnd)
+            guard CMTimeCompare(clipStartInFile, fileDuration) < 0 else {
+                print("⚠️ Skipping \(seg.fileURL.lastPathComponent) — clipStart past end")
+                continue
+            }
 
+            let insertRange = CMTimeRange(start: clipStartInFile, end: fileDuration)
             do {
-                try track.insertTimeRange(timeRange, of: assetTrack, at: insertCursor)
+                try track.insertTimeRange(insertRange, of: videoTrack, at: insertCursor)
                 if firstSegment {
-                    // The raw camera time that maps to composition t=0.
-                    compositionOriginRawTime = CMTimeAdd(seg.startTime, clipStart)
+                    let rawDurSecs = CMTimeGetSeconds(segRawDuration)
+                    let scale      = rawDurSecs > 0 ? (rawDurSecs / fileDurationSecs) : 1.0
+                    compositionOriginRawTime = CMTimeAdd(seg.startTime,
+                        CMTimeMultiplyByFloat64(clipStartInFile, multiplier: scale))
                     firstSegment = false
                 }
-                insertCursor = CMTimeAdd(insertCursor,
-                                         CMTimeSubtract(fileLocalEnd, clipStart))
+                insertCursor = CMTimeAdd(insertCursor, CMTimeSubtract(fileDuration, clipStartInFile))
+                print("✅ Inserted \(seg.fileURL.lastPathComponent): " +
+                      "\(String(format: "%.2f", CMTimeGetSeconds(clipStartInFile)))s → " +
+                      "\(String(format: "%.2f", fileDurationSecs))s")
             } catch {
-                print("❌ Composition insert error: \(error)")
+                print("❌ Insert error \(seg.fileURL.lastPathComponent): \(error)")
             }
         }
 
-        guard !firstSegment else { return (nil, .zero, 0) }  // nothing inserted
+        guard !firstSegment else {
+            print("❌ buildComposition: no usable segments")
+            return (nil, .zero, 0)
+        }
 
-        // Count timestamps that fall within the composition window.
         timestampLock.lock()
         let tsCount = frameTimestamps.filter {
-            CMTimeCompare($0, CMTimeAdd(compositionOriginRawTime, CMTime.zero)) >= 0
+            CMTimeCompare($0, compositionOriginRawTime) >= 0
         }.count
         timestampLock.unlock()
 
+        print("✅ buildComposition — \(String(format: "%.2f", CMTimeGetSeconds(comp.duration)))s, " +
+              "\(tsCount) timestamps")
         return (comp, compositionOriginRawTime, tsCount)
     }
 

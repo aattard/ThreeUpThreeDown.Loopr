@@ -1438,49 +1438,81 @@ class DelayedCameraView: UIView {
     // MARK: - Restart
 
     private func restartCountdown() {
-        if isLooping   { stopLoop()        }
+        // 1. Clean up playback/clip state
+        if isLooping   { stopLoop() }
         if isClipMode  { exitClipModeClean() }
         hideControls()
+        tearDownPlayer()
+        hideActivityAlert()
+        activityCheckTimer?.invalidate()
+        activityCountdownTimer?.invalidate()
+        stopRecordingIndicator()
+        displayTimer?.invalidate()
+        displayTimer = nil
 
+        // 2. Reset all state flags
         isPaused         = false
         isShowingDelayed = false
-        tearDownPlayer()
+        isActive         = false   // temporarily false while we rebuild
+        scrubberPosition = 0
+        clipStartIndex   = 0
+        clipEndIndex     = 0
+        clipPlayheadPosition = 0
+        lastUpdateTime   = 0
 
-        let oldBuffer    = videoFileBuffer
-        videoFileBuffer  = nil
-        captureQueue.sync { oldBuffer?.cleanup() }
-        print("♻️ Old VideoFileBuffer drained")
-
-        let actualFPS   = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let maxDuration = 300 + delaySeconds + 10
-        videoFileBuffer = VideoFileBuffer(
-            maxDurationSeconds: maxDuration,
-            delaySeconds:       delaySeconds,
-            fps:                actualFPS,
-            writeQueue:         captureQueue,
-            ciContext:          ciContext)
-
-        videoDataOutput?.setSampleBufferDelegate(self, queue: captureQueue)
-
-        let w = 1920, h = 1080
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey:  AVVideoCodecType.h264,
-            AVVideoWidthKey:  w,
-            AVVideoHeightKey: h,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey:          w * h * 11,
-                AVVideoProfileLevelKey:            AVVideoProfileLevelH264HighAutoLevel,
-                AVVideoExpectedSourceFrameRateKey: actualFPS,
-                AVVideoMaxKeyFrameIntervalKey:     actualFPS
-            ]
-        ]
-        try? videoFileBuffer?.startWriting(videoSettings: videoSettings, isInitialStart: true)
-
-        UIView.animate(withDuration: 0.3) {
-            self.previewLayer?.opacity  = 1
-            self.displayImageView.alpha = 0
+        // 3. Reset duration label
+        if let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel {
+            durationLabel.text = "00:00:00"
         }
-        startCountdown()
+
+        // 4. Fully stop the existing capture session and tear down everything,
+        //    just like stopSession does — but without calling onSessionStopped.
+        let savedDelay         = delaySeconds
+        let savedIsFrontCamera = isFrontCamera
+
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+
+            // Stop the running session
+            if self.captureSession?.isRunning == true {
+                self.captureSession.stopRunning()
+            }
+
+            // Tear down the old buffer completely
+            let oldBuffer    = self.videoFileBuffer
+            self.videoFileBuffer = nil
+            oldBuffer?.cleanup()
+            print("♻️ Old capture session and buffer fully torn down")
+
+            DispatchQueue.main.async {
+                // Remove the old preview layer
+                self.previewLayer?.removeFromSuperlayer()
+                self.previewLayer = nil
+
+                // Remove all inputs and outputs from the old session
+                // so setupCamera gets a clean slate
+                if let session = self.captureSession {
+                    session.beginConfiguration()
+                    session.inputs.forEach  { session.removeInput($0) }
+                    session.outputs.forEach { session.removeOutput($0) }
+                    session.commitConfiguration()
+                }
+                self.captureSession = nil
+                self.videoDataOutput = nil
+                self.currentDevice   = nil
+
+                self.displayImageView.alpha = 0
+
+                // 5. Now do a full re-init exactly like startSession does
+                self.isActive      = true
+                self.isFrontCamera = savedIsFrontCamera
+                self.delaySeconds  = savedDelay
+                self.isPaused      = false
+
+                print("♻️ Restarting capture stack from scratch...")
+                self.setupCamera(useFrontCamera: savedIsFrontCamera)
+            }
+        }
     }
 
     // MARK: - Display frame (live delay)
