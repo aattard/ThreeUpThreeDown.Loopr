@@ -301,7 +301,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             
             // Start button - bottom center
             startButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            startButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -40),
+            startButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -10),
             startButton.widthAnchor.constraint(equalToConstant: 120),
             startButton.heightAnchor.constraint(equalToConstant: 120),
             

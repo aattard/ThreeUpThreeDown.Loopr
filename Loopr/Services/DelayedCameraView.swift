@@ -484,7 +484,7 @@ class DelayedCameraView: UIView {
         b.contentEdgeInsets = UIEdgeInsets(top: 4, left: 14, bottom: 4, right: 14)
         b.translatesAutoresizingMaskIntoConstraints = false
         b.isUserInteractionEnabled = false
-        b.alpha = 0
+        b.isHidden = true
         return b
     }()
 
@@ -528,19 +528,19 @@ class DelayedCameraView: UIView {
 
         NSLayoutConstraint.activate([
             countdownLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            countdownLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            countdownLabel.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -60),
             countdownLabel.widthAnchor.constraint(equalToConstant: 200),
             countdownLabel.heightAnchor.constraint(equalToConstant: 200),
 
             countdownStopButton.centerXAnchor.constraint(equalTo: centerXAnchor),
             countdownStopButton.bottomAnchor.constraint(
-                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -40),
+                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
             countdownStopButton.widthAnchor.constraint(equalToConstant: 120),
             countdownStopButton.heightAnchor.constraint(equalToConstant: 120),
 
             livePauseButton.centerXAnchor.constraint(equalTo: centerXAnchor),
             livePauseButton.bottomAnchor.constraint(
-                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -40),
+                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
             livePauseButton.widthAnchor.constraint(equalToConstant: 120),
             livePauseButton.heightAnchor.constraint(equalToConstant: 120),
 
@@ -1267,9 +1267,9 @@ class DelayedCameraView: UIView {
                 let minutes = bufferDurationSeconds / 60
                 let minLabel = minutes == 1 ? "min" : "mins"
                 self.bufferLimitLabel.setTitle("Playback limited to last \(minutes) \(minLabel)", for: .normal)
-                self.bufferLimitLabel.alpha = 1
+                bufferLimitLabel.isHidden = false
             } else {
-                self.bufferLimitLabel.alpha = 0
+                bufferLimitLabel.isHidden = true
             }
             
             self.seekPlayer(toFrameIndex: self.scrubberPosition)
@@ -1281,7 +1281,7 @@ class DelayedCameraView: UIView {
             
             // Restore label visibility after showControls
             if !self.bufferLimitLabel.isHidden {
-                self.bufferLimitLabel.alpha = 1
+                bufferLimitLabel.isHidden = false
             }
 
             /*
@@ -1346,12 +1346,24 @@ class DelayedCameraView: UIView {
 
     /// Match the AVPlayerLayer's transform to the current capture orientation
     /// so the paused / playing video appears correctly oriented.
+    /*
     private func applyPlayerLayerTransform() {
         guard let pl = playerLayer else { return }
         let angle = previewLayer?.connection?.videoRotationAngle ?? 0
         let radians = angle * .pi / 180.0
         var t = CGAffineTransform(rotationAngle: CGFloat(radians))
         if isFrontCamera { t = t.scaledBy(x: -1, y: 1) }
+        pl.setAffineTransform(t)
+        pl.frame = bounds
+    }
+    */
+    private func applyPlayerLayerTransform() {
+        guard let pl = playerLayer else { return }
+        let angle = previewLayer?.connection?.videoRotationAngle ?? 0
+        let radians = angle * .pi / 180.0
+        var t = CGAffineTransform.identity
+        if isFrontCamera { t = t.scaledBy(x: -1, y: 1) }
+        t = t.rotated(by: CGFloat(radians))
         pl.setAffineTransform(t)
         pl.frame = bounds
     }
@@ -1492,7 +1504,7 @@ class DelayedCameraView: UIView {
             }
         }
     }
-
+    
     // MARK: - Countdown
 
     private func startCountdown() {
@@ -1572,7 +1584,7 @@ class DelayedCameraView: UIView {
         if isLooping { isLooping = false }
         if isClipMode { exitClipModeClean() }
         
-        bufferLimitLabel.alpha = 0
+        bufferLimitLabel.isHidden = true
 
         captureQueue.async { [weak self] in
             guard let self else { return }
@@ -1613,7 +1625,7 @@ class DelayedCameraView: UIView {
         clipEndIndex     = 0
         clipPlayheadPosition = 0
         lastUpdateTime   = 0
-        bufferLimitLabel.alpha = 0
+        bufferLimitLabel.isHidden = true
 
         // 3. Reset duration label
         if let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel {
