@@ -2266,16 +2266,16 @@ class DelayedCameraView: UIView {
 
         switch rotationAngle {
         case 90:
-            // Rotate 90° CW: (x,y) → (y, -x), translate back into positive quadrant.
+            // Rotate 90° CW: translate by naturalSize.height (NOT width) to stay in frame
             transform = CGAffineTransform(rotationAngle: .pi / 2)
-                .translatedBy(x: 0, y: -naturalSize.width)
+                .translatedBy(x: 0, y: -naturalSize.height)
         case 180:
             transform = CGAffineTransform(rotationAngle: .pi)
                 .translatedBy(x: -naturalSize.width, y: -naturalSize.height)
         case 270:
-            // Rotate 90° CCW.
+            // Rotate 90° CCW: translate by naturalSize.width
             transform = CGAffineTransform(rotationAngle: -.pi / 2)
-                .translatedBy(x: -naturalSize.height, y: 0)
+                .translatedBy(x: -naturalSize.width, y: 0)
         default:
             transform = .identity
         }
