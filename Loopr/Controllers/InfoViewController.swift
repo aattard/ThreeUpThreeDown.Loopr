@@ -1,4 +1,5 @@
 import UIKit
+import SafariServices
 
 class InfoViewController: UIViewController {
 
@@ -130,12 +131,34 @@ class InfoViewController: UIViewController {
         return b
     }()
 
-    private let companyLogoImageView: UIImageView = {
-        let iv = UIImageView()
-        iv.contentMode = .scaleAspectFit
-        iv.image = UIImage(named: "splash-company-logo")
-        iv.translatesAutoresizingMaskIntoConstraints = false
-        return iv
+    private let companyLogoButton: UIButton = {
+        let b = UIButton(type: .custom)
+        b.setImage(UIImage(named: "splash-company-logo"), for: .normal)
+        b.imageView?.contentMode = .scaleAspectFit
+        b.setContentHuggingPriority(.required, for: .horizontal)
+        b.setContentCompressionResistancePriority(.required, for: .horizontal)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
+
+    private let signsLogoButton: UIButton = {
+        let b = UIButton(type: .custom)
+        b.setImage(UIImage(named: "splash-signs-logo"), for: .normal)
+        b.imageView?.contentMode = .scaleAspectFit
+        b.setContentHuggingPriority(.required, for: .horizontal)
+        b.setContentCompressionResistancePriority(.required, for: .horizontal)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
+
+    private let logosStack: UIStackView = {
+        let sv = UIStackView()
+        sv.axis = .vertical
+        sv.spacing = 24
+        sv.alignment = .center
+        sv.distribution = .equalSpacing
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        return sv
     }()
 
     private let versionLabel: UILabel = {
@@ -170,6 +193,28 @@ class InfoViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .black
         setupUI()
+        applyLogoAspectRatios()
+    }
+
+    /// Reads each logo image's actual pixel size and pins each button's width
+    /// to that aspect ratio at 60pt height — so both logos share the same height
+    /// regardless of how wide their artwork is.
+    private func applyLogoAspectRatios() {
+        let height: CGFloat = 60
+
+        // Company logo: fixed height, width from its aspect ratio
+        if let companyImg = UIImage(named: "splash-company-logo"), companyImg.size.height > 0 {
+            let companyWidth = height * (companyImg.size.width / companyImg.size.height)
+            companyLogoButton.widthAnchor.constraint(equalToConstant: companyWidth).isActive = true
+            companyLogoButton.heightAnchor.constraint(equalToConstant: height).isActive = true
+
+            // Signs logo: same width, height derived from its own aspect ratio at that width
+            signsLogoButton.widthAnchor.constraint(equalToConstant: companyWidth).isActive = true
+            if let signsImg = UIImage(named: "splash-signs-logo"), signsImg.size.width > 0 {
+                let signsHeight = companyWidth * (signsImg.size.height / signsImg.size.width)
+                signsLogoButton.heightAnchor.constraint(equalToConstant: signsHeight).isActive = true
+            }
+        }
     }
 
     // MARK: - Setup
@@ -186,7 +231,7 @@ class InfoViewController: UIViewController {
 
         [logoImageView, titleLabel, sloganLabel,
          cardsStack, supportLabel, supportSubLabel, emailButton,
-         companyLogoImageView, versionLabel].forEach { contentView.addSubview($0) }
+         logosStack, versionLabel].forEach { contentView.addSubview($0) }
 
         NSLayoutConstraint.activate([
             // Scroll view – full screen
@@ -242,18 +287,22 @@ class InfoViewController: UIViewController {
             emailButton.topAnchor.constraint(equalTo: supportSubLabel.bottomAnchor, constant: 10),
             emailButton.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
 
-            // Company logo
-            companyLogoImageView.topAnchor.constraint(equalTo: emailButton.bottomAnchor, constant: 50),
-            companyLogoImageView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            companyLogoImageView.widthAnchor.constraint(equalToConstant: 160),
-            companyLogoImageView.heightAnchor.constraint(equalToConstant: 60),
+            // Logos stacked – centred, widths and heights set from image aspect ratios at runtime
+            logosStack.topAnchor.constraint(equalTo: emailButton.bottomAnchor, constant: 50),
+            logosStack.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
 
             // Version
-            versionLabel.topAnchor.constraint(equalTo: companyLogoImageView.bottomAnchor, constant: 32),
+            versionLabel.topAnchor.constraint(equalTo: logosStack.bottomAnchor, constant: 32),
             versionLabel.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             versionLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10)
         ])
 
+        // Build logos stack
+        logosStack.addArrangedSubview(companyLogoButton)
+        logosStack.addArrangedSubview(signsLogoButton)
+
+        companyLogoButton.addTarget(self, action: #selector(companyLogoTapped), for: .touchUpInside)
+        signsLogoButton.addTarget(self, action: #selector(signsLogoTapped), for: .touchUpInside)
         emailButton.addTarget(self, action: #selector(emailTapped), for: .touchUpInside)
     }
 
@@ -318,6 +367,20 @@ class InfoViewController: UIViewController {
 
     @objc private func closeTapped() {
         dismiss(animated: true)
+    }
+
+    @objc private func companyLogoTapped() {
+        guard let url = URL(string: "https://www.3up3down.io/?utm_source=loopr-ios") else { return }
+        let safari = SFSafariViewController(url: url)
+        safari.preferredControlTintColor = accentColor
+        present(safari, animated: true)
+    }
+
+    @objc private func signsLogoTapped() {
+        guard let url = URL(string: "https://signs.3up3down.io/?utm_source=loopr-ios") else { return }
+        let safari = SFSafariViewController(url: url)
+        safari.preferredControlTintColor = accentColor
+        present(safari, animated: true)
     }
 
     @objc private func emailTapped() {

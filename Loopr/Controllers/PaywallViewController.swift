@@ -50,6 +50,12 @@ class PaywallViewController: UIViewController {
             color: purple
         ),
         FeatureCard(
+            icon: "record.circle",
+            title: "Review Buffer",
+            description: "Keep up to 5 minutes of video ready to scrub through after you pause. Never miss a moment worth reviewing.",
+            color: purple
+        ),
+        FeatureCard(
             icon: "infinity",
             title: "Own It Forever",
             description: "One-time purchase. No subscription. No renewal. Pay once and Loopr is yours on every device you own.",
@@ -468,19 +474,32 @@ extension PaywallViewController: UICollectionViewDelegateFlowLayout {
     func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
         stopAutoScroll()
 
-        let cardWidth: CGFloat = 280  // Match the card size
+        let cardWidth: CGFloat = 280
         let spacing: CGFloat = 16
+        let stride = cardWidth + spacing
         let inset = (carouselCollectionView.bounds.width - cardWidth) / 2
 
-        let rawIndex = (targetContentOffset.pointee.x + carouselCollectionView.bounds.width / 2 - inset) / (cardWidth + spacing)
-        let rounded = velocity.x > 0 ? ceil(rawIndex) : (velocity.x < 0 ? floor(rawIndex) : round(rawIndex))
-        let clampedIndex = max(0, min(Int(rounded), totalItems - 1))
+        // Projected landing point (centre of the collection view)
+        let projectedOffset = targetContentOffset.pointee.x + inset + cardWidth / 2
 
-        targetContentOffset.pointee.x = CGFloat(clampedIndex) * (cardWidth + spacing) - inset
-        currentPage = clampedIndex
-        pageControl.currentPage = clampedIndex % features.count
+        // Which index is closest to the projected landing point?
+        var nearestIndex = Int((projectedOffset + stride / 2) / stride)
+        nearestIndex = max(0, min(nearestIndex, totalItems - 1))
 
-        // Restart auto scroll after user settles
+        // If flicking, advance or retreat exactly one card from current position
+        if velocity.x > 0.3 {
+            nearestIndex = currentPage + 1
+        } else if velocity.x < -0.3 {
+            nearestIndex = currentPage - 1
+        }
+        nearestIndex = max(0, min(nearestIndex, totalItems - 1))
+
+        // Snap to the exact centre of that card
+        targetContentOffset.pointee.x = CGFloat(nearestIndex) * stride - inset
+        currentPage = nearestIndex
+        pageControl.currentPage = nearestIndex % features.count
+
+        // Restart auto-scroll after user settles
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
             self?.startAutoScroll()
         }

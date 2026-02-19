@@ -519,7 +519,8 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
                 action.setValue(true, forKey: "checked")
             }
             if recommended {
-                let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
+                //let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
+                let starImage = UIImage(systemName: "star.fill")?.withTintColor(.white, renderingMode: .alwaysOriginal)
                 action.setValue(starImage, forKey: "image")
             }
             alert.addAction(action)
@@ -609,7 +610,8 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
                 action.setValue(true, forKey: "checked")
             }
             if recommended {
-                let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
+                //let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
+                let starImage = UIImage(systemName: "star.fill")?.withTintColor(.white, renderingMode: .alwaysOriginal)
                 action.setValue(starImage, forKey: "image")
             }
             alert.addAction(action)

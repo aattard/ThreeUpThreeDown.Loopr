@@ -145,9 +145,6 @@ class LiveCameraPreviewView: UIView {
             guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
                 print("❌ No camera found for preview")
                 session.commitConfiguration()
-                DispatchQueue.main.async {
-                    completion?()
-                }
                 return
             }
             
