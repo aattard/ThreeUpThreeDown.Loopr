@@ -474,6 +474,19 @@ class DelayedCameraView: UIView {
         b.translatesAutoresizingMaskIntoConstraints = false; b.isHidden = true
         return b
     }()
+    
+    private let bufferLimitLabel: UIButton = {
+        let b = UIButton(type: .system)
+        b.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .medium)
+        b.setTitleColor(.white, for: .normal)
+        b.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.85)
+        b.layer.cornerRadius = 12
+        b.contentEdgeInsets = UIEdgeInsets(top: 4, left: 14, bottom: 4, right: 14)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.isUserInteractionEnabled = false
+        b.alpha = 0
+        return b
+    }()
 
     // MARK: - Layout constraints (mutable)
 
@@ -593,6 +606,7 @@ class DelayedCameraView: UIView {
         addSubview(controlsContainer)
         addSubview(recordingIndicator)
         addSubview(topRightButtonContainer)
+        addSubview(bufferLimitLabel)
 
         controlsContainer.addSubview(playPauseButton)
         controlsContainer.addSubview(timelineContainer)
@@ -752,7 +766,11 @@ class DelayedCameraView: UIView {
             playheadTouchArea.centerXAnchor.constraint(equalTo: clipPlayhead.centerXAnchor),
             playheadTouchArea.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             playheadTouchArea.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
-            playheadTouchArea.widthAnchor.constraint(equalToConstant: 44)
+            playheadTouchArea.widthAnchor.constraint(equalToConstant: 44),
+            
+            bufferLimitLabel.topAnchor.constraint(equalTo: controlsContainer.bottomAnchor, constant: 3),
+            bufferLimitLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            bufferLimitLabel.heightAnchor.constraint(equalToConstant: 24)
         ])
 
         leftHandleConstraint  = leftTrimHandle.leadingAnchor.constraint(
@@ -807,6 +825,7 @@ class DelayedCameraView: UIView {
         UIView.animate(withDuration: 0.3) {
             self.controlsContainer.alpha      = 0
             self.topRightButtonContainer.alpha = 0
+            self.bufferLimitLabel.alpha        = 0
         }
     }
 
@@ -1010,7 +1029,8 @@ class DelayedCameraView: UIView {
             scrubberPosition = min(scrubberPosition, pausePoint)
 
             updateScrubberPlayheadPosition()
-            let secs = Float(scrubberPosition - oldest) / Float(fps)
+            let displayPos = (scrubberPosition >= pausePoint) ? pausePoint : scrubberPosition
+            let secs = Float(displayPos - oldest) / Float(fps)
             timeLabel.text = formatTime(secs)
         }
     }
@@ -1130,7 +1150,35 @@ class DelayedCameraView: UIView {
         if gesture.state == .began {
             if isLooping { stopLoop() }
         }
+        
+        // ── In clip mode, scrubbing the background moves the clip playhead ──
+        if isClipMode {
+            let location = gesture.location(in: timelineContainer)
+            guard let buf = videoFileBuffer else { return }
+            let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+            let totalFrames = buf.getTimestampCount()
+            let requiredFrames = delaySeconds * actualFPS
+            guard totalFrames > requiredFrames else { return }
 
+            let pausePoint  = totalFrames - requiredFrames
+            let oldest      = oldestAllowedIndex()
+            let scrubRange  = pausePoint - oldest
+            let timelineWidth = timelineContainer.bounds.width
+            guard scrubRange > 0, timelineWidth > 0 else { return }
+
+            let clampedX      = max(0, min(location.x, timelineWidth))
+            let normalized    = clampedX / timelineWidth
+            let frameIndex    = oldest + Int(normalized * CGFloat(scrubRange))
+
+            // Clamp to clip region
+            clipPlayheadPosition = min(max(frameIndex, clipStartIndex), clipEndIndex)
+            seekPlayer(toFrameIndex: clipPlayheadPosition)
+            updatePlayheadPosition()
+            updateTimeLabel()
+            return
+        }
+
+        // ── Normal scrub mode ──
         let location = gesture.location(in: timelineContainer)
         let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
 
@@ -1152,8 +1200,8 @@ class DelayedCameraView: UIView {
 
         updateScrubberPlayheadPosition()
 
-        let secs = Float(scrubberPosition - oldest) / Float(actualFPS)
-        //timeLabel.text = String(format: "%05.2f", secs)
+        let displayPos = (scrubberPosition >= pausePoint - 1) ? pausePoint : scrubberPosition
+        let secs = Float(displayPos - oldest) / Float(actualFPS)
         timeLabel.text = formatTime(secs)
 
         // Seek the player (coalesced — never stacks).
@@ -1211,16 +1259,39 @@ class DelayedCameraView: UIView {
             self.scrubberPosition = max(0, pausePoint - 1)
 
             self.setupPlayer(with: item, composition: composition)
+            
+            // Show buffer limit label only if recorded longer than buffer setting
+            let bufferDurationSeconds = Settings.shared.bufferDurationSeconds
+            let recordedSeconds = totalFrames / actualFPS
+            if recordedSeconds > bufferDurationSeconds {
+                let minutes = bufferDurationSeconds / 60
+                let minLabel = minutes == 1 ? "min" : "mins"
+                self.bufferLimitLabel.setTitle("Playback limited to last \(minutes) \(minLabel)", for: .normal)
+                self.bufferLimitLabel.alpha = 1
+            } else {
+                self.bufferLimitLabel.alpha = 0
+            }
+            
             self.seekPlayer(toFrameIndex: self.scrubberPosition)
 
             self.updateScrubberPlayheadPosition()
             self.showControls()
             self.playerLayer?.isHidden = false
             self.displayImageView.alpha = 0
+            
+            // Restore label visibility after showControls
+            if !self.bufferLimitLabel.isHidden {
+                self.bufferLimitLabel.alpha = 1
+            }
 
+            /*
             let oldest = self.oldestAllowedIndex()
             let secs   = Float(self.scrubberPosition - oldest) / Float(actualFPS)
             self.timeLabel.text = self.formatTime(secs)
+             */
+            let oldest = self.oldestAllowedIndex()
+            let displaySecs = Float(pausePoint - oldest) / Float(actualFPS)
+            self.timeLabel.text = self.formatTime(displaySecs)
 
             print("⏸ Paused — scrubberPosition: \(self.scrubberPosition), " +
                   "totalFrames: \(totalFrames), " +
@@ -1410,7 +1481,7 @@ class DelayedCameraView: UIView {
                           self.countdownLabel, self.countdownStopButton,
                           self.livePauseButton, self.successFeedbackView,
                           self.cancelClipButton, self.recordingIndicator,
-                          self.controlsContainer, self.topRightButtonContainer] as [UIView] {
+                          self.controlsContainer, self.topRightButtonContainer, self.bufferLimitLabel] as [UIView] {
                     self.bringSubviewToFront(v)
                 }
             }
@@ -1500,6 +1571,8 @@ class DelayedCameraView: UIView {
 
         if isLooping { isLooping = false }
         if isClipMode { exitClipModeClean() }
+        
+        bufferLimitLabel.alpha = 0
 
         captureQueue.async { [weak self] in
             guard let self else { return }
@@ -1540,6 +1613,7 @@ class DelayedCameraView: UIView {
         clipEndIndex     = 0
         clipPlayheadPosition = 0
         lastUpdateTime   = 0
+        bufferLimitLabel.alpha = 0
 
         // 3. Reset duration label
         if let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel {
@@ -1944,6 +2018,34 @@ class DelayedCameraView: UIView {
 
     @objc private func handleTimelineTap(_ gesture: UITapGestureRecognizer) {
         guard isClipMode else { return }
+        
+        // ── In clip mode ──
+        if isClipMode {
+            let location = gesture.location(in: timelineContainer)
+            guard let buf = videoFileBuffer else { return }
+            let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+            let totalFrames = buf.getTimestampCount()
+            let requiredFrames = delaySeconds * actualFPS
+            guard totalFrames > requiredFrames else { return }
+
+            let pausePoint    = totalFrames - requiredFrames
+            let oldest        = oldestAllowedIndex()
+            let scrubRange    = pausePoint - oldest
+            let timelineWidth = timelineContainer.bounds.width
+            guard scrubRange > 0, timelineWidth > 0 else { return }
+
+            let clampedX   = max(0, min(location.x, timelineWidth))
+            let normalized = clampedX / timelineWidth
+            let frameIndex = oldest + Int(normalized * CGFloat(scrubRange))
+
+            clipPlayheadPosition = min(max(frameIndex, clipStartIndex), clipEndIndex)
+            seekPlayer(toFrameIndex: clipPlayheadPosition)
+            updatePlayheadPosition()
+            updateTimeLabel()
+            return
+        }
+
+        // existing tap-to-scrub code for non-clip mode...
         let loc = gesture.location(in: timelineContainer)
         let w   = timelineContainer.bounds.width
         guard w > 0, clipEndIndex > clipStartIndex else { return }
