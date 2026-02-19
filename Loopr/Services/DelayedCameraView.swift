@@ -425,7 +425,7 @@ class DelayedCameraView: UIView {
 
     private let timeLabel: UILabel = {
         let l = UILabel(); l.text = "LIVE"
-        l.font = .monospacedDigitSystemFont(ofSize: 14, weight: .semibold)
+        l.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         l.textColor = .white
         l.translatesAutoresizingMaskIntoConstraints = false
         return l
@@ -651,58 +651,47 @@ class DelayedCameraView: UIView {
         timelineContainer.addGestureRecognizer(timelineTap)
 
         NSLayoutConstraint.activate([
-            recordingIndicator.topAnchor.constraint(
-                equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            recordingIndicator.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
             recordingIndicator.centerXAnchor.constraint(equalTo: centerXAnchor),
             recordingIndicator.heightAnchor.constraint(equalToConstant: 36),
             recordingIndicator.widthAnchor.constraint(greaterThanOrEqualToConstant: 100),
 
-            topRightButtonContainer.topAnchor.constraint(
-                equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
-            topRightButtonContainer.trailingAnchor.constraint(
-                equalTo: trailingAnchor, constant: -20),
+            topRightButtonContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            topRightButtonContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             topRightButtonContainer.heightAnchor.constraint(equalToConstant: 64),
             topRightButtonContainer.widthAnchor.constraint(equalToConstant: 108),
-            restartButton.leadingAnchor.constraint(
-                equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
+            
+            restartButton.leadingAnchor.constraint(equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
             restartButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
             restartButton.widthAnchor.constraint(equalToConstant: 44),
             restartButton.heightAnchor.constraint(equalToConstant: 44),
-            stopSessionButton.trailingAnchor.constraint(
-                equalTo: topRightButtonContainer.trailingAnchor, constant: -10),
+            
+            stopSessionButton.trailingAnchor.constraint(equalTo: topRightButtonContainer.trailingAnchor, constant: -10),
             stopSessionButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
             stopSessionButton.widthAnchor.constraint(equalToConstant: 44),
             stopSessionButton.heightAnchor.constraint(equalToConstant: 44),
 
-            controlsContainer.leadingAnchor.constraint(
-                equalTo: leadingAnchor, constant: 20),
-            controlsContainer.trailingAnchor.constraint(
-                equalTo: trailingAnchor, constant: -20),
-            controlsContainer.bottomAnchor.constraint(
-                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
+            controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            controlsContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
             controlsContainer.heightAnchor.constraint(equalToConstant: 80),
 
-            playPauseButton.leadingAnchor.constraint(
-                equalTo: controlsContainer.leadingAnchor, constant: 20),
+            playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 20),
             playPauseButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             playPauseButton.widthAnchor.constraint(equalToConstant: 44),
             playPauseButton.heightAnchor.constraint(equalToConstant: 44),
 
-            clipSaveButton.trailingAnchor.constraint(
-                equalTo: controlsContainer.trailingAnchor, constant: -20),
+            clipSaveButton.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -20),
             clipSaveButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             clipSaveButton.widthAnchor.constraint(equalToConstant: 44),
             clipSaveButton.heightAnchor.constraint(equalToConstant: 44),
 
-            timeLabel.trailingAnchor.constraint(
-                equalTo: clipSaveButton.leadingAnchor, constant: -5),
+            timeLabel.trailingAnchor.constraint(equalTo: clipSaveButton.leadingAnchor, constant: -5),
             timeLabel.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
-            timeLabel.widthAnchor.constraint(equalToConstant: 75),
+            timeLabel.widthAnchor.constraint(equalToConstant: 58),
 
-            timelineContainer.leadingAnchor.constraint(
-                equalTo: playPauseButton.trailingAnchor, constant: 20),
-            timelineContainer.trailingAnchor.constraint(
-                equalTo: timeLabel.leadingAnchor, constant: -20),
+            timelineContainer.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 10),
+            timelineContainer.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -10),
             timelineContainer.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             timelineContainer.heightAnchor.constraint(equalToConstant: 44),
 
@@ -715,8 +704,7 @@ class DelayedCameraView: UIView {
             scrubberPlayhead.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             scrubberPlayhead.widthAnchor.constraint(equalToConstant: 3),
             scrubberPlayheadKnob.centerXAnchor.constraint(equalTo: scrubberPlayhead.centerXAnchor),
-            scrubberPlayheadKnob.topAnchor.constraint(
-                equalTo: scrubberPlayhead.topAnchor, constant: -6),
+            scrubberPlayheadKnob.topAnchor.constraint(equalTo: scrubberPlayhead.topAnchor, constant: -6),
             scrubberPlayheadKnob.widthAnchor.constraint(equalToConstant: 16),
             scrubberPlayheadKnob.heightAnchor.constraint(equalToConstant: 16),
 
@@ -758,8 +746,7 @@ class DelayedCameraView: UIView {
             clipPlayhead.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             clipPlayhead.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
             clipPlayheadKnob.centerXAnchor.constraint(equalTo: clipPlayhead.centerXAnchor),
-            clipPlayheadKnob.topAnchor.constraint(
-                equalTo: clipPlayhead.topAnchor, constant: -6),
+            clipPlayheadKnob.topAnchor.constraint(equalTo: clipPlayhead.topAnchor, constant: -6),
             clipPlayheadKnob.widthAnchor.constraint(equalToConstant: 16),
             clipPlayheadKnob.heightAnchor.constraint(equalToConstant: 16),
 
@@ -773,21 +760,14 @@ class DelayedCameraView: UIView {
             bufferLimitLabel.heightAnchor.constraint(equalToConstant: 24)
         ])
 
-        leftHandleConstraint  = leftTrimHandle.leadingAnchor.constraint(
-            equalTo: timelineContainer.leadingAnchor)
-        rightHandleConstraint = rightTrimHandle.trailingAnchor.constraint(
-            equalTo: timelineContainer.trailingAnchor)
-        playheadConstraint    = clipPlayhead.leadingAnchor.constraint(
-            equalTo: timelineContainer.leadingAnchor)
+        leftHandleConstraint  = leftTrimHandle.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor)
+        rightHandleConstraint = rightTrimHandle.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor)
+        playheadConstraint    = clipPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor)
         playheadWidthConstraint = clipPlayhead.widthAnchor.constraint(equalToConstant: 3)
-        clipBackgroundLeadingConstraint  = clipRegionBackground.leadingAnchor.constraint(
-            equalTo: leftTrimHandle.trailingAnchor)
-        clipBackgroundTrailingConstraint = clipRegionBackground.trailingAnchor.constraint(
-            equalTo: rightTrimHandle.leadingAnchor)
-        scrubberPlayheadConstraint  = scrubberPlayhead.leadingAnchor.constraint(
-            equalTo: timelineContainer.leadingAnchor)
-        scrubberTouchAreaConstraint = scrubberTouchArea.leadingAnchor.constraint(
-            equalTo: timelineContainer.leadingAnchor, constant: -22)
+        clipBackgroundLeadingConstraint  = clipRegionBackground.leadingAnchor.constraint(equalTo: leftTrimHandle.trailingAnchor)
+        clipBackgroundTrailingConstraint = clipRegionBackground.trailingAnchor.constraint(equalTo: rightTrimHandle.leadingAnchor)
+        scrubberPlayheadConstraint  = scrubberPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor)
+        scrubberTouchAreaConstraint = scrubberTouchArea.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: -22)
 
         [leftHandleConstraint, rightHandleConstraint, playheadConstraint,
          playheadWidthConstraint, clipBackgroundLeadingConstraint,
