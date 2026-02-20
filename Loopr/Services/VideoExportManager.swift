@@ -76,9 +76,15 @@ final class VideoExportManager {
             return
         }
 
+        // 1. Calculate duration strictly from the frames selected to avoid Out-Of-Bounds index lookups
+        let actualFPS = max(fps, 1)
+        let frames = max(0, endIndex - startIndex)
+        let durationSeconds = Double(frames) / Double(actualFPS)
+        let duration = CMTime(seconds: durationSeconds, preferredTimescale: 600)
+        
+        // 2. Look up the start time (this is safe because startIndex is always within bounds)
         let startTime = buffer.compositionTime(forFrameIndex: startIndex) ?? .zero
-        let endTime = buffer.compositionTime(forFrameIndex: endIndex) ?? buffer.pausedCompositionEndTime
-        let timeRange = CMTimeRange(start: startTime, end: endTime)
+        let timeRange = CMTimeRange(start: startTime, duration: duration)
 
         let tmp = FileManager.default.temporaryDirectory
         let url = tmp.appendingPathComponent("LooprClip-\(UUID().uuidString).mp4")
@@ -100,7 +106,7 @@ final class VideoExportManager {
             let transform = VideoPlaybackHelpers.exportTransformForRotationAngle(rotationAngle, naturalSize: natural, isFrontCamera: isFrontCamera)
 
             let vc = AVMutableVideoComposition()
-            vc.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(fps, 1)))
+            vc.frameDuration = CMTime(value: 1, timescale: CMTimeScale(actualFPS))
 
             // Render size: rotate swaps width/height.
             let renderSize: CGSize
@@ -112,7 +118,7 @@ final class VideoExportManager {
             vc.renderSize = CGSize(width: abs(renderSize.width), height: abs(renderSize.height))
 
             let instruction = AVMutableVideoCompositionInstruction()
-            // Ensure the instruction time range fully covers the asset
+            // Ensure the instruction covers the entire composition so the exporter can extract the timeRange
             instruction.timeRange = CMTimeRange(start: .zero, duration: comp.duration)
 
             let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
@@ -135,4 +141,5 @@ final class VideoExportManager {
             }
         }
     }
+
 }
