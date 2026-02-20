@@ -482,8 +482,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         controlsContainer.addSubview(playPauseButton)
         controlsContainer.addSubview(timelineContainer)
         controlsContainer.addSubview(timeLabel)
-        controlsContainer.addSubview(clipSaveButton)
-
+        
+        topRightButtonContainer.addSubview(clipSaveButton)
         topRightButtonContainer.addSubview(restartButton)
         topRightButtonContainer.addSubview(stopSessionButton)
 
@@ -530,9 +530,14 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             topRightButtonContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
             topRightButtonContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             topRightButtonContainer.heightAnchor.constraint(equalToConstant: 64),
-            topRightButtonContainer.widthAnchor.constraint(equalToConstant: 108),
+            topRightButtonContainer.widthAnchor.constraint(equalToConstant: 152),
 
-            restartButton.leadingAnchor.constraint(equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
+            clipSaveButton.leadingAnchor.constraint(equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
+            clipSaveButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
+            clipSaveButton.widthAnchor.constraint(equalToConstant: 44),
+            clipSaveButton.heightAnchor.constraint(equalToConstant: 44),
+            
+            restartButton.leadingAnchor.constraint(equalTo: clipSaveButton.trailingAnchor, constant: 0),
             restartButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
             restartButton.widthAnchor.constraint(equalToConstant: 44),
             restartButton.heightAnchor.constraint(equalToConstant: 44),
@@ -552,12 +557,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             playPauseButton.widthAnchor.constraint(equalToConstant: 44),
             playPauseButton.heightAnchor.constraint(equalToConstant: 44),
 
-            clipSaveButton.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -20),
-            clipSaveButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
-            clipSaveButton.widthAnchor.constraint(equalToConstant: 44),
-            clipSaveButton.heightAnchor.constraint(equalToConstant: 44),
-
-            timeLabel.trailingAnchor.constraint(equalTo: clipSaveButton.leadingAnchor, constant: -5),
+            timeLabel.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -20),
             timeLabel.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
             timeLabel.widthAnchor.constraint(equalToConstant: 58),
 
