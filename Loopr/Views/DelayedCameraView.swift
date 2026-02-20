@@ -39,7 +39,7 @@ final class DelayedCameraView: UIView {
     private var activityCheckTimer: Timer?
     private var activityCountdownTimer: Timer?
     private var activityTimeRemaining: Int = 60
-    private let activityCheckInterval: TimeInterval = 2700
+    private let activityCheckInterval: TimeInterval = 3600 //3600 for 60 min, 2700 for 45 min
 
     // MARK: - Queues / context
 
@@ -196,7 +196,10 @@ final class DelayedCameraView: UIView {
 
         let prog = UIView()
         prog.backgroundColor = UIColor.black.withAlphaComponent(0.4)
+        prog.layer.cornerRadius = 6
+        prog.layer.maskedCorners = [.layerMaxXMinYCorner]
         prog.translatesAutoresizingMaskIntoConstraints = false
+        prog.isUserInteractionEnabled = false
         prog.tag = 1002
         yes.insertSubview(prog, at: 0)
 
@@ -221,9 +224,9 @@ final class DelayedCameraView: UIView {
             yes.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -30),
             yes.heightAnchor.constraint(equalToConstant: 56),
 
-            prog.leadingAnchor.constraint(equalTo: yes.leadingAnchor),
-            prog.topAnchor.constraint(equalTo: yes.topAnchor),
+            prog.leadingAnchor.constraint(equalTo: yes.leadingAnchor), // Starts on the left
             prog.bottomAnchor.constraint(equalTo: yes.bottomAnchor),
+            prog.heightAnchor.constraint(equalToConstant: 12),
 
             no.topAnchor.constraint(equalTo: yes.bottomAnchor, constant: 10),
             no.centerXAnchor.constraint(equalTo: c.centerXAnchor),
@@ -761,7 +764,7 @@ final class DelayedCameraView: UIView {
         guard let btn = activityAlertContainer.viewWithTag(1001),
               let prog = btn.viewWithTag(1002) else { return }
 
-        let fraction = CGFloat(activityTimeRemaining) / 60.0
+        let fraction = 1.0 - (CGFloat(activityTimeRemaining) / 60.0) // Fills up as time drops
         let newWidth = btn.bounds.width * fraction
 
         if activityProgressConstraint == nil {
