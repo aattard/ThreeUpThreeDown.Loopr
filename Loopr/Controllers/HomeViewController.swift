@@ -507,7 +507,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         )
         
         // (seconds, isRecommended)
-        let delays: [(Int, Bool)] = [(5, false), (7, true), (10, false)]
+        let delays: [(Int, Bool)] = [(5, false), (7, true), (10, false), (12, false)]
         
         for (delay, recommended) in delays {
             let action = UIAlertAction(title: "\(delay) seconds", style: .default) { [weak self] _ in
@@ -597,7 +597,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         )
         
         // (minutes, isRecommended)
-        let options: [(Int, Bool)] = [(1, true), (2, true), (3, false), (4, false), (5, false)]
+        let options: [(Int, Bool)] = [(1, true), (2, false), (3, false), (4, false), (5, false)]
         
         for (minutes, recommended) in options {
             let title = "\(minutes) \(minutes == 1 ? "minute" : "minutes")"

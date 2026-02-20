@@ -594,10 +594,10 @@ final class DelayedCameraView: UIView {
                 return
             }
 
-            let totalFrames = buf.getTimestampCount()
+            let totalFrames = buf.getCurrentFrameCount()
             let requiredFrames = self.delaySeconds * actualFPS
             let pausePoint = max(0, totalFrames - requiredFrames)
-            let initialScrubberIndex = max(0, pausePoint - 1)
+            let initialScrubberIndex = pausePoint
 
             let recordedSeconds = totalFrames / max(actualFPS, 1)
             let bufferDurationSeconds = Settings.shared.bufferDurationSeconds

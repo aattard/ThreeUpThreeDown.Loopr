@@ -862,7 +862,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard isLooping, let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -936,7 +936,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard !isClipMode, let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -982,7 +982,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -1006,8 +1006,23 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     // MARK: - Oldest allowed index helper
 
     private func oldestAllowedIndex(totalFrames: Int, pausePoint: Int, fps: Int) -> Int {
-        let maxScrubFrames = max(scrubDurationSeconds * fps, 1)
-        return max(0, pausePoint - maxScrubFrames)
+        guard let buf = videoFileBuffer else { return 0 }
+        
+        let actualFPS = max(fps, 1)
+        
+        // 1. Calculate how many frames back the math SAYS we should go
+        let maxScrubFrames = max(scrubDurationSeconds * actualFPS, 1)
+        let mathOldest = max(0, pausePoint - maxScrubFrames)
+        
+        // 2. See what time the composition ACTUALLY starts at (due to pruning)
+        let startSeconds = CMTimeGetSeconds(buf.pausedCompositionDisplayStartTime)
+        
+        // If startSeconds is > 0, pruning occurred!
+        // We convert that start time into a frame index.
+        let prunedOldest = Int(startSeconds * Double(actualFPS))
+        
+        // Return whichever is greater: the 5-minute math limit, or the pruned limit.
+        return max(mathOldest, prunedOldest)
     }
 
     // MARK: - Clip mode
@@ -1016,7 +1031,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         guard totalFrames > requiredFrames else { return }
 
@@ -1096,7 +1111,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -1131,7 +1146,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -1159,7 +1174,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -1177,7 +1192,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard isClipMode, let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -1233,7 +1248,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard isClipMode, let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -1299,7 +1314,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard isClipMode, let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
@@ -1332,7 +1347,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard let buf = videoFileBuffer else { return }
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
-        let totalFrames = buf.getTimestampCount()
+        let totalFrames = buf.getCurrentFrameCount()
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
