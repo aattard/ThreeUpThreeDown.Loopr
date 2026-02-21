@@ -1904,6 +1904,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         case .changed, .ended:
             currentZoomScale = max(1.0, min(currentZoomScale * gesture.scale, 6.0))
             gesture.scale = 1.0
+            // If we've pinched back to 1x, reset translation too so nothing is off-center
+            if currentZoomScale == 1.0 {
+                currentZoomTranslation = .zero
+            }
             applyZoomTransform()
         default:
             break
@@ -1911,7 +1915,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func handleZoomPan(_ gesture: UIPanGestureRecognizer) {
-        guard currentZoomScale > 1.0 else { return }
+        // Allow pan whenever scale > 1, OR while the gesture is already active
+        // (covers the moment scale snaps back to 1.0 while fingers are still moving)
+        guard currentZoomScale > 1.0 || gesture.state == .changed else { return }
         let delta = gesture.translation(in: self)
         currentZoomTranslation.x += delta.x
         currentZoomTranslation.y += delta.y
@@ -1921,14 +1927,15 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func applyZoomTransform() {
+        // translatedBy works in the post-scale coordinate space, so divide by scale
         zoomContainer.transform = CGAffineTransform(scaleX: currentZoomScale, y: currentZoomScale)
             .translatedBy(x: currentZoomTranslation.x / currentZoomScale,
                           y: currentZoomTranslation.y / currentZoomScale)
     }
 
     private func clampZoomTranslation() {
-        let maxX = (bounds.width  * (currentZoomScale - 1)) / 2
-        let maxY = (bounds.height * (currentZoomScale - 1)) / 2
+        let maxX = bounds.width * (currentZoomScale - 1) / 2
+        let maxY = bounds.height * (currentZoomScale - 1) / 2
         currentZoomTranslation.x = max(-maxX, min(currentZoomTranslation.x, maxX))
         currentZoomTranslation.y = max(-maxY, min(currentZoomTranslation.y, maxY))
     }
