@@ -5,7 +5,6 @@ import Photos
 final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Dependencies (injected)
-
     private weak var videoFileBuffer: VideoFileBuffer?
     private var isFrontCamera: Bool = false
     private var delaySeconds: Int = 7
@@ -14,49 +13,48 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     var onRestartRequested: (() -> Void)?
     var onStopSessionRequested: (() -> Void)?
 
-    // MARK: - AVPlayer (scrub + playback)
+    /// Called when the user taps Split (enabled when either bucket has a temp clip).
+    /// `leftURL` corresponds to bucket 1, `rightURL` corresponds to bucket 2.
+    var onSplitScreenRequested: ((URL?, URL?) -> Void)?
 
+    // MARK: - AVPlayer (scrub + playback)
     private var player: AVPlayer?
     private var playerLayer: AVPlayerLayer?
     private var playerTimeObserver: Any?
     private var playerLoopObserver: NSObjectProtocol?
-
     private var isSeeking: Bool = false
     private var pendingScrubIndex: Int?
 
     // MARK: - Scrub / loop state
-
     private var scrubberPosition: Int = 0 // global frame index
     private var isLooping: Bool = false
 
     // MARK: - Clip selection
-
     private var clipStartIndex: Int = 0
     private var clipEndIndex: Int = 0
     private var isClipMode: Bool = false
     private var clipPlayheadPosition: Int = 0
 
-    // MARK: - Pan gesture tracking
+    // MARK: - Split temp clips (buckets)
+    private var tempClipBucket1URL: URL?
+    private var tempClipBucket2URL: URL?
 
+    // MARK: - Pan gesture tracking
     private var initialLeftPosition: CGFloat = 0
     private var initialRightPosition: CGFloat = 0
     private var initialPlayheadPosition: CGFloat = 0
-
     private var initialClipStartIndex: Int = 0
     private var initialClipEndIndex: Int = 0
     private var initialClipPlayheadPosition: Int = 0
-
     private var isDraggingHandle: Bool = false
     private var lastUpdateTime: TimeInterval = 0
 
     // MARK: - Config
-
     private var scrubDurationSeconds: Int { Settings.shared.bufferDurationSeconds }
     private var scrubberGrabOffsetX: CGFloat = 0
     private let handleWidth: CGFloat = 20
 
     // MARK: - UI
-
     private let successFeedbackView: UIView = {
         let v = UIView()
         v.backgroundColor = UIColor.black.withAlphaComponent(0.5)
@@ -70,8 +68,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         iv.tintColor = .white
         iv.contentMode = .center
         iv.translatesAutoresizingMaskIntoConstraints = false
-
         v.addSubview(iv)
+
         NSLayoutConstraint.activate([
             iv.centerXAnchor.constraint(equalTo: v.centerXAnchor),
             iv.centerYAnchor.constraint(equalTo: v.centerYAnchor),
@@ -268,6 +266,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         return l
     }()
 
+    // Clip / Save-to-Photos toggle button (film -> download icon in clip mode)
     private let clipSaveButton: UIButton = {
         let b = UIButton(type: .system)
         let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
@@ -277,20 +276,94 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         return b
     }()
 
+    private let closeButtonContainer: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        v.layer.cornerRadius = 22
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.clipsToBounds = true
+        return v
+    }()
+    
+    // Cancel clip mode button
     private let cancelClipButton: UIButton = {
         let b = UIButton(type: .system)
-        b.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        b.layer.cornerRadius = 18
-        b.clipsToBounds = true
-        b.setTitle("Cancel", for: .normal)
-        b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
+        let img = UIImage(systemName: "chevron.backward.circle", withConfiguration: cfg)
+        b.setImage(img, for: .normal)
+        b.setTitle(" Back", for: .normal) // space so text doesnâ€™t touch icon
+        b.tintColor = .white
         b.setTitleColor(.white, for: .normal)
-        b.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        b.backgroundColor = UIColor.clear
+        b.contentEdgeInsets = UIEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
         b.translatesAutoresizingMaskIntoConstraints = false
         b.isHidden = true
         return b
     }()
 
+    // NEW: Top-left container for clip controls
+    private let topLeftButtonContainer: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        v.layer.cornerRadius = 32
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.alpha = 0
+        v.clipsToBounds = true
+        return v
+    }()
+
+    private let topLeftButtonStack: UIStackView = {
+        let s = UIStackView()
+        s.axis = .horizontal
+        s.alignment = .center
+        s.distribution = .fill
+        s.spacing = 6
+        s.translatesAutoresizingMaskIntoConstraints = false
+        return s
+    }()
+
+    private let bucketDivider: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.white.withAlphaComponent(0.3)
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isHidden = true
+        v.widthAnchor.constraint(equalToConstant: 1).isActive = true
+        return v
+    }()
+
+    private let bucket1Button: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 26, weight: .light)
+        b.setImage(UIImage(systemName: "1.square", withConfiguration: cfg), for: .normal)
+        b.tintColor = .white
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.isHidden = true
+        return b
+    }()
+
+    private let bucket2Button: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 26, weight: .light)
+        b.setImage(UIImage(systemName: "2.square", withConfiguration: cfg), for: .normal)
+        b.tintColor = .white
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.isHidden = true
+        return b
+    }()
+
+    private let splitScreenButton: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 26, weight: .light)
+        b.setImage(UIImage(systemName: "square.split.2x1", withConfiguration: cfg), for: .normal)
+        b.tintColor = .systemGray3
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.isHidden = true
+        b.isEnabled = false
+        return b
+    }()
+
+    // MARK: - Top right container (restart / end session)
     private let topRightButtonContainer: UIView = {
         let v = UIView()
         v.backgroundColor = UIColor.black.withAlphaComponent(0.7)
@@ -333,7 +406,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }()
 
     // MARK: - Mutable constraints
-
     private var leftHandleConstraint: NSLayoutConstraint?
     private var rightHandleConstraint: NSLayoutConstraint?
     private var playheadConstraint: NSLayoutConstraint?
@@ -344,24 +416,18 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     private var scrubberTouchAreaConstraint: NSLayoutConstraint?
 
     // MARK: - Init
-
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
 
         addSubview(successFeedbackView)
-        addSubview(cancelClipButton)
-
         setupControls()
 
         NSLayoutConstraint.activate([
             successFeedbackView.centerXAnchor.constraint(equalTo: centerXAnchor),
             successFeedbackView.centerYAnchor.constraint(equalTo: centerYAnchor),
             successFeedbackView.widthAnchor.constraint(equalToConstant: 200),
-            successFeedbackView.heightAnchor.constraint(equalToConstant: 200),
-
-            cancelClipButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
-            cancelClipButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            successFeedbackView.heightAnchor.constraint(equalToConstant: 200)
         ])
 
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap)))
@@ -371,16 +437,20 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     deinit {
         tearDownPlayer()
+        cleanupTempSplitClips()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
+
         playerLayer?.frame = bounds
         applyPlayerTransformNow()
-        
-        // Force the timeline to figure out its new width FIRST,
-        // so bounds.width is accurate for the playhead math below.
+
+        // Force the timeline to figure out its new width FIRST, so bounds.width is accurate.
         timelineContainer.layoutIfNeeded()
+
+        // Update split icon on rotations / size changes.
+        updateSplitIconForCurrentOrientation()
 
         if isClipMode {
             updateClipHandlePositions()
@@ -391,7 +461,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Public API
-
     func presentPausedRecording(
         buffer: VideoFileBuffer,
         playerItem: AVPlayerItem,
@@ -403,6 +472,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         recordedSeconds: Int,
         bufferDurationSeconds: Int
     ) {
+        // Reset split temps whenever a new recording is presented
+        cleanupTempSplitClips()
+
         self.videoFileBuffer = buffer
         self.delaySeconds = delaySeconds
         self.isFrontCamera = isFrontCamera
@@ -418,15 +490,12 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         if recordedSeconds > bufferDurationSeconds {
             bufferLimitLabel.isHidden = false
             bufferLimitLabel.alpha = 1
-            
+
             let formatter = DateComponentsFormatter()
             formatter.allowedUnits = [.minute, .second]
             formatter.unitsStyle = .full
-            
-            // Generate the string, then capitalize the first letter of each word
             let rawTimeString = formatter.string(from: TimeInterval(bufferDurationSeconds)) ?? "\(bufferDurationSeconds) seconds"
             let capitalizedTimeString = rawTimeString.capitalized
-            
             bufferLimitLabel.setTitle("Last \(capitalizedTimeString) Recorded", for: .normal)
         } else {
             bufferLimitLabel.isHidden = true
@@ -434,37 +503,24 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         }
 
         setupPlayer(with: playerItem, composition: composition)
-        showControls()
 
+        showControls()
         seekPlayer(toFrameIndex: scrubberPosition, completion: nil)
         updateScrubberPlayheadPosition()
         updateTimeLabel()
     }
 
-    func resetUIAndTearDown() {
-        if isLooping { stopLoop() }
-        if isClipMode { exitClipModeClean() }
-
-        tearDownPlayer()
-
-        bufferLimitLabel.isHidden = true
-        bufferLimitLabel.alpha = 0
-
-        hideControls()
-    }
-
+    // MARK: - Player transform
     func applyPlayerTransformNow() {
         guard let pl = playerLayer else { return }
-        
-        // Remove manual layer rotation entirely
+
         pl.setAffineTransform(.identity)
         pl.frame = bounds
-        
-        // Let the player handle gravity dynamically based on app orientation
+
         let currentOri = UIApplication.shared.windows.first?.windowScene?.interfaceOrientation
         let isAppPortrait = currentOri == .portrait || currentOri == .portraitUpsideDown || currentOri == .unknown
         let isVideoPortrait = Int(recordedRotationAngle) == 90 || Int(recordedRotationAngle) == 270
-        
+
         if isAppPortrait == isVideoPortrait {
             pl.videoGravity = .resizeAspectFill
         } else {
@@ -473,20 +529,38 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Controls setup
-
     private func setupControls() {
         addSubview(controlsContainer)
         addSubview(topRightButtonContainer)
+        addSubview(topLeftButtonContainer)
         addSubview(bufferLimitLabel)
 
+        // Bottom controls
         controlsContainer.addSubview(playPauseButton)
         controlsContainer.addSubview(timelineContainer)
         controlsContainer.addSubview(timeLabel)
-        
-        topRightButtonContainer.addSubview(clipSaveButton)
+
+        // Top right controls
         topRightButtonContainer.addSubview(restartButton)
         topRightButtonContainer.addSubview(stopSessionButton)
 
+        topLeftButtonContainer.addSubview(topLeftButtonStack)
+
+        // Order: Cancel, Save, divider, 1, 2, Split
+        topLeftButtonStack.addArrangedSubview(cancelClipButton)
+        topLeftButtonStack.addArrangedSubview(clipSaveButton)
+        topLeftButtonStack.addArrangedSubview(bucketDivider)
+        topLeftButtonStack.addArrangedSubview(bucket1Button)
+        topLeftButtonStack.addArrangedSubview(bucket2Button)
+        topLeftButtonStack.addArrangedSubview(splitScreenButton)
+
+        // Use custom spacing to keep normal spacing around cancel/save and tight spacing around the buckets
+        topLeftButtonStack.spacing = 6
+        topLeftButtonStack.setCustomSpacing(10, after: clipSaveButton)
+        topLeftButtonStack.setCustomSpacing(-6, after: bucket1Button)
+        topLeftButtonStack.setCustomSpacing(-6, after: bucket2Button)
+
+        // Timeline subviews
         timelineContainer.addSubview(scrubberBackground)
         timelineContainer.addSubview(scrubberPlayhead)
         scrubberPlayhead.addSubview(scrubberPlayheadKnob)
@@ -497,18 +571,26 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         timelineContainer.addSubview(rightDimView)
         timelineContainer.addSubview(topBorder)
         timelineContainer.addSubview(bottomBorder)
+
         timelineContainer.addSubview(playheadTouchArea)
         timelineContainer.addSubview(leftTrimHandle)
         timelineContainer.addSubview(rightTrimHandle)
         timelineContainer.addSubview(clipPlayhead)
         clipPlayhead.addSubview(clipPlayheadKnob)
 
+        // Targets
         playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
         stopSessionButton.addTarget(self, action: #selector(stopSessionTapped), for: .touchUpInside)
         restartButton.addTarget(self, action: #selector(restartTapped), for: .touchUpInside)
+
         clipSaveButton.addTarget(self, action: #selector(clipSaveButtonTapped), for: .touchUpInside)
         cancelClipButton.addTarget(self, action: #selector(cancelClipTapped), for: .touchUpInside)
 
+        bucket1Button.addTarget(self, action: #selector(bucket1Tapped), for: .touchUpInside)
+        bucket2Button.addTarget(self, action: #selector(bucket2Tapped), for: .touchUpInside)
+        splitScreenButton.addTarget(self, action: #selector(splitScreenTapped), for: .touchUpInside)
+
+        // Gestures
         let leftPan = UIPanGestureRecognizer(target: self, action: #selector(handleLeftTrimPan(_:)))
         leftTrimHandle.addGestureRecognizer(leftPan)
 
@@ -526,18 +608,15 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         timelineTap.cancelsTouchesInView = false
         timelineContainer.addGestureRecognizer(timelineTap)
 
+        // Constraints
         NSLayoutConstraint.activate([
+            // Top right container
             topRightButtonContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
             topRightButtonContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             topRightButtonContainer.heightAnchor.constraint(equalToConstant: 64),
-            topRightButtonContainer.widthAnchor.constraint(equalToConstant: 152),
+            topRightButtonContainer.widthAnchor.constraint(equalToConstant: 108),
 
-            clipSaveButton.leadingAnchor.constraint(equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
-            clipSaveButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
-            clipSaveButton.widthAnchor.constraint(equalToConstant: 44),
-            clipSaveButton.heightAnchor.constraint(equalToConstant: 44),
-            
-            restartButton.leadingAnchor.constraint(equalTo: clipSaveButton.trailingAnchor, constant: 0),
+            restartButton.leadingAnchor.constraint(equalTo: topRightButtonContainer.leadingAnchor, constant: 10),
             restartButton.centerYAnchor.constraint(equalTo: topRightButtonContainer.centerYAnchor),
             restartButton.widthAnchor.constraint(equalToConstant: 44),
             restartButton.heightAnchor.constraint(equalToConstant: 44),
@@ -547,6 +626,37 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             stopSessionButton.widthAnchor.constraint(equalToConstant: 44),
             stopSessionButton.heightAnchor.constraint(equalToConstant: 44),
 
+            // Top left container
+            topLeftButtonContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
+            topLeftButtonContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
+            topLeftButtonContainer.heightAnchor.constraint(equalToConstant: 64),
+
+            // Prevent overlap with top right (compress if needed on small phones)
+            topLeftButtonContainer.trailingAnchor.constraint(lessThanOrEqualTo: topRightButtonContainer.leadingAnchor, constant: -10),
+
+            // Let the stack dictate the width of the container
+            topLeftButtonStack.leadingAnchor.constraint(equalTo: topLeftButtonContainer.leadingAnchor, constant: 10),
+            topLeftButtonStack.trailingAnchor.constraint(equalTo: topLeftButtonContainer.trailingAnchor, constant: -10),
+            topLeftButtonStack.centerYAnchor.constraint(equalTo: topLeftButtonContainer.centerYAnchor),
+
+            // Button sizing in stack
+            //cancelClipButton.heightAnchor.constraint(equalToConstant: 44),
+
+            clipSaveButton.widthAnchor.constraint(equalToConstant: 44),
+            clipSaveButton.heightAnchor.constraint(equalToConstant: 44),
+
+            bucket1Button.widthAnchor.constraint(equalToConstant: 44),
+            bucket1Button.heightAnchor.constraint(equalToConstant: 44),
+
+            bucket2Button.widthAnchor.constraint(equalToConstant: 44),
+            bucket2Button.heightAnchor.constraint(equalToConstant: 44),
+
+            splitScreenButton.widthAnchor.constraint(equalToConstant: 44),
+            splitScreenButton.heightAnchor.constraint(equalToConstant: 44),
+
+            bucketDivider.heightAnchor.constraint(equalToConstant: 34),
+
+            // Bottom controls container
             controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             controlsContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
@@ -630,9 +740,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
             bufferLimitLabel.topAnchor.constraint(equalTo: controlsContainer.bottomAnchor, constant: 3),
             bufferLimitLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            bufferLimitLabel.heightAnchor.constraint(equalToConstant: 24),
+            bufferLimitLabel.heightAnchor.constraint(equalToConstant: 24)
         ])
 
+        // Mutable constraints
         leftHandleConstraint = leftTrimHandle.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor)
         rightHandleConstraint = rightTrimHandle.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor)
         playheadConstraint = clipPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor)
@@ -652,10 +763,13 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             scrubberPlayheadConstraint,
             scrubberTouchAreaConstraint
         ].forEach { $0?.isActive = true }
+
+        // Initial UI state
+        refreshBucketIcons()
+        updateSplitButtonState()
     }
 
     // MARK: - Tap & controls visibility
-
     @objc private func handleTap() {
         if controlsContainer.alpha == 0 {
             showControls()
@@ -668,6 +782,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         UIView.animate(withDuration: 0.3) {
             self.controlsContainer.alpha = 1
             self.topRightButtonContainer.alpha = 1
+            self.topLeftButtonContainer.alpha = 1
             if !self.bufferLimitLabel.isHidden { self.bufferLimitLabel.alpha = 1 }
         }
     }
@@ -676,12 +791,12 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         UIView.animate(withDuration: 0.3) {
             self.controlsContainer.alpha = 0
             self.topRightButtonContainer.alpha = 0
+            self.topLeftButtonContainer.alpha = 0
             self.bufferLimitLabel.alpha = 0
         }
     }
 
     // MARK: - Button actions
-
     @objc private func playPauseTapped() {
         if isLooping { stopLoop() } else { startLoop() }
     }
@@ -696,10 +811,12 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func restartTapped() {
+        cleanupTempSplitClips()
         onRestartRequested?()
     }
 
     @objc private func stopSessionTapped() {
+        cleanupTempSplitClips()
         onStopSessionRequested?()
     }
 
@@ -707,12 +824,154 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         exitClipMode()
     }
 
-    // MARK: - AVPlayer setup / teardown
+    @objc private func bucket1Tapped() {
+        handleBucketTap(bucket: 1)
+    }
 
+    @objc private func bucket2Tapped() {
+        handleBucketTap(bucket: 2)
+    }
+
+    @objc private func splitScreenTapped() {
+        guard tempClipBucket1URL != nil || tempClipBucket2URL != nil else { return }
+        if isLooping { stopLoop() }
+
+        // Stay in clip mode, keep handles and playhead where they are.
+        onSplitScreenRequested?(tempClipBucket1URL, tempClipBucket2URL)
+    }
+
+    // MARK: - Bucket logic
+    private func handleBucketTap(bucket: Int) {
+        guard isClipMode else { return }
+        if isLooping { stopLoop() }
+
+        switch bucket {
+        case 1:
+            if let url = tempClipBucket1URL {
+                print("ðŸ—‘ Clearing bucket 1 temp clip at \(url.path)")
+                try? FileManager.default.removeItem(at: url)
+                tempClipBucket1URL = nil
+                refreshBucketIcons()
+                updateSplitButtonState()
+                return
+            }
+            // creating a new one:
+            exportCurrentSelectionToTemp { [weak self] url in
+                guard let self, let url else { return }
+                print("âœ… Bucket 1 assigned temp clip at \(url.path)")
+                self.tempClipBucket1URL = url
+                self.refreshBucketIcons()
+                self.updateSplitButtonState()
+            }
+
+        case 2:
+            if let url = tempClipBucket2URL {
+                print("ðŸ—‘ Clearing bucket 2 temp clip at \(url.path)")
+                try? FileManager.default.removeItem(at: url)
+                tempClipBucket2URL = nil
+                refreshBucketIcons()
+                updateSplitButtonState()
+                return
+            }
+            exportCurrentSelectionToTemp { [weak self] url in
+                guard let self, let url else { return }
+                print("âœ… Bucket 2 assigned temp clip at \(url.path)")
+                self.tempClipBucket2URL = url
+                self.refreshBucketIcons()
+                self.updateSplitButtonState()
+            }
+
+        default:
+            return
+        }
+    }
+
+    private func exportCurrentSelectionToTemp(completion: @escaping (URL?) -> Void) {
+        guard let buf = videoFileBuffer else { completion(nil); return }
+
+        let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+
+        let overlay = createLoadingView(text: "Creating clipâ€¦")
+        addSubview(overlay)
+        overlay.frame = bounds
+
+        SplitTempClipExportManager.exportTempClip(
+            from: buf,
+            startIndex: clipStartIndex,
+            endIndex: clipEndIndex,
+            isFrontCamera: isFrontCamera,
+            rotationAngle: recordedRotationAngle,
+            fps: fps
+        ) { [weak self] result in
+            guard let self else { return }
+            overlay.removeFromSuperview()
+
+            switch result {
+            case .success(let url):
+                completion(url)
+            case .failure(let err):
+                self.showError(err.localizedDescription)
+                completion(nil)
+            }
+        }
+    }
+
+    private func refreshBucketIcons() {
+        setBucketIcon(button: bucket1Button, number: 1, filled: tempClipBucket1URL != nil)
+        setBucketIcon(button: bucket2Button, number: 2, filled: tempClipBucket2URL != nil)
+        updateSplitButtonState()
+    }
+
+    private func setBucketIcon(button: UIButton, number: Int, filled: Bool) {
+        // Change .bold to .light or .thin here!
+        let cfg = UIImage.SymbolConfiguration(pointSize: 26, weight: .light)
+        let base = "\(number).square"
+        let name = filled ? "\(base).fill" : base
+        button.setImage(UIImage(systemName: name, withConfiguration: cfg), for: .normal)
+        button.tintColor = filled ? .systemYellow : .white
+    }
+
+    private func updateSplitButtonState() {
+        let enabled = (tempClipBucket1URL != nil || tempClipBucket2URL != nil)
+        splitScreenButton.isEnabled = enabled
+        splitScreenButton.tintColor = enabled ? .white : .systemGray3
+    }
+
+    private func updateSplitIconForCurrentOrientation() {
+        let ori = window?.windowScene?.interfaceOrientation
+        let isLandscape: Bool
+        if let ori {
+            isLandscape = ori.isLandscape
+        } else {
+            isLandscape = bounds.width > bounds.height
+        }
+
+        let name = isLandscape ? "square.split.2x1" : "square.split.1x2"
+        // Change weight from .bold to .light here!
+        let cfg = UIImage.SymbolConfiguration(pointSize: 26, weight: .light)
+        splitScreenButton.setImage(UIImage(systemName: name, withConfiguration: cfg), for: .normal)
+    }
+
+    /// Call this from the controller when SplitVideoView closes, per your cleanup rules.
+    func cleanupTempSplitClips() {
+        if let url = tempClipBucket1URL {
+            print("ðŸ—‘ Deleting temp clip 1 at \(url.path)")
+            try? FileManager.default.removeItem(at: url)
+        }
+        if let url = tempClipBucket2URL {
+            print("ðŸ—‘ Deleting temp clip 2 at \(url.path)")
+            try? FileManager.default.removeItem(at: url)
+        }
+        tempClipBucket1URL = nil
+        tempClipBucket2URL = nil
+        refreshBucketIcons()
+    }
+
+    // MARK: - AVPlayer setup / teardown
     private func setupPlayer(with item: AVPlayerItem, composition: AVMutableComposition) {
         tearDownPlayer()
 
-        // Trim to buffer’s displayable end time
+        // Trim to bufferâ€™s displayable end time
         if let buf = videoFileBuffer {
             let endTime = buf.pausedCompositionEndTime
             if CMTimeGetSeconds(endTime) > 0 {
@@ -720,7 +979,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             }
         }
 
-        // ✅ NEW: Tell the AVPlayerItem to rotate/mirror the video natively
+        // Rotate/mirror the video natively
         if let videoTrack = composition.tracks(withMediaType: .video).first {
             let natural = videoTrack.naturalSize
             let transform = VideoPlaybackHelpers.exportTransformForRotationAngle(
@@ -728,11 +987,11 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
                 naturalSize: natural,
                 isFrontCamera: isFrontCamera
             )
-            
+
             let vc = AVMutableVideoComposition()
             let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
             vc.frameDuration = CMTime(value: 1, timescale: CMTimeScale(max(fps, 1)))
-            
+
             // Swap width/height for portrait angles
             let isPortrait = Int(recordedRotationAngle) == 90 || Int(recordedRotationAngle) == 270
             vc.renderSize = isPortrait ? CGSize(width: natural.height, height: natural.width) : natural
@@ -745,7 +1004,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
             instruction.layerInstructions = [layerInstruction]
             vc.instructions = [instruction]
-
             item.videoComposition = vc
         }
 
@@ -784,6 +1042,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             player?.removeTimeObserver(obs)
             playerTimeObserver = nil
         }
+
         if let obs = playerLoopObserver {
             NotificationCenter.default.removeObserver(obs)
             playerLoopObserver = nil
@@ -791,16 +1050,13 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         player?.pause()
         player = nil
-
         playerLayer?.removeFromSuperlayer()
         playerLayer = nil
-
         isSeeking = false
         pendingScrubIndex = nil
     }
 
     // MARK: - Loop playback
-
     private func startLoop() {
         guard let buf = videoFileBuffer, let comp = buf.pausedComposition else { return }
 
@@ -813,11 +1069,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             setupPlayer(with: item, composition: comp)
         }
 
-        // Seek to current playhead position.
         let idx = isClipMode ? clipPlayheadPosition : scrubberPosition
         seekPlayer(toFrameIndex: idx) { [weak self] in
-            guard let self else { return }
-            self.player?.play()
+            self?.player?.play()
         }
     }
 
@@ -828,7 +1082,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
         playPauseButton.setImage(UIImage(systemName: "play.circle.fill", withConfiguration: cfg), for: .normal)
 
-        // Snap still frame at the current position and hide player layer.
         let idx = isClipMode ? clipPlayheadPosition : scrubberPosition
         seekPlayer(toFrameIndex: idx, completion: nil)
     }
@@ -848,8 +1101,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
             if let item = self.player?.currentItem {
                 item.forwardPlaybackEndTime = self.isClipMode
-                    ? (buf.compositionTime(forFrameIndex: self.clipEndIndex) ?? buf.pausedCompositionEndTime)
-                    : buf.pausedCompositionEndTime
+                ? (buf.compositionTime(forFrameIndex: self.clipEndIndex) ?? buf.pausedCompositionEndTime)
+                : buf.pausedCompositionEndTime
             }
 
             self.player?.play()
@@ -857,7 +1110,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Player time -> UI mapping
-
     private func playerDidAdvance(to time: CMTime, duration: CMTime) {
         guard isLooping, let buf = videoFileBuffer else { return }
 
@@ -866,12 +1118,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
-
         let scrubRange = max(1, pausePoint - oldest)
 
         if isClipMode {
             let clipRange = max(1, clipEndIndex - clipStartIndex)
-
             let endSecs = CMTimeGetSeconds(buf.compositionTime(forFrameIndex: clipEndIndex) ?? duration)
             let startSecs = CMTimeGetSeconds(buf.compositionTime(forFrameIndex: clipStartIndex) ?? .zero)
             let rangeSecs = max(0.001, endSecs - startSecs)
@@ -882,7 +1132,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             updatePlayheadPosition()
             updateTimeLabel()
         } else {
-            // Ratio mapping across display range.
             let displayStart = CMTimeGetSeconds(buf.pausedCompositionDisplayStartTime)
             let displayEnd = CMTimeGetSeconds(buf.pausedCompositionEndTime)
             let displayRange = max(0.001, displayEnd - displayStart)
@@ -899,7 +1148,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Seek helper
-
     private func seekPlayer(toFrameIndex index: Int, completion: (() -> Void)? = nil) {
         guard let buf = videoFileBuffer,
               let compositionTime = buf.compositionTime(forFrameIndex: index) else {
@@ -931,7 +1179,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Scrubber pan (non-clip mode)
-
     @objc private func handleScrubberPan(_ gesture: UIPanGestureRecognizer) {
         guard !isClipMode, let buf = videoFileBuffer else { return }
 
@@ -940,6 +1187,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let requiredFrames = delaySeconds * fps
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
+
         guard pausePoint > oldest else { return }
 
         let range = pausePoint - oldest
@@ -947,19 +1195,14 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard width > 0 else { return }
 
         let loc = gesture.location(in: timelineContainer)
-
-        // We use the scrubberTouchArea's center as the canonical "handle position"
-        // so the user can grab it even when it's at the edges.
         let currentHandleCenterX = (scrubberTouchAreaConstraint?.constant ?? 0) + 22.0
 
         switch gesture.state {
         case .began:
             if isLooping { stopLoop() }
-            // Remember where inside the handle the user grabbed so it doesn't jump.
             scrubberGrabOffsetX = currentHandleCenterX - loc.x
 
         case .changed, .ended, .cancelled:
-            // Apply offset and clamp to [0, width]
             var desiredCenterX = loc.x + scrubberGrabOffsetX
             desiredCenterX = max(0, min(desiredCenterX, width))
 
@@ -969,8 +1212,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
             updateScrubberPlayheadPosition()
             updateTimeLabel()
-
-            // Keep player in sync for playback.
             seekPlayer(toFrameIndex: scrubberPosition, completion: nil)
 
         default:
@@ -995,38 +1236,26 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let x = frac * width
 
         scrubberPlayheadConstraint?.constant = x
-
-        // Center the 44pt touch area on x.
-        // Do NOT clamp this to [0, width - 44]; let it hang off the ends so it's easy to grab.
         scrubberTouchAreaConstraint?.constant = x - 22
-
         layoutIfNeeded()
     }
 
     // MARK: - Oldest allowed index helper
-
     private func oldestAllowedIndex(totalFrames: Int, pausePoint: Int, fps: Int) -> Int {
         guard let buf = videoFileBuffer else { return 0 }
-        
+
         let actualFPS = max(fps, 1)
-        
-        // 1. Calculate how many frames back the math SAYS we should go
+
         let maxScrubFrames = max(scrubDurationSeconds * actualFPS, 1)
         let mathOldest = max(0, pausePoint - maxScrubFrames)
-        
-        // 2. See what time the composition ACTUALLY starts at (due to pruning)
+
         let startSeconds = CMTimeGetSeconds(buf.pausedCompositionDisplayStartTime)
-        
-        // If startSeconds is > 0, pruning occurred!
-        // We convert that start time into a frame index.
         let prunedOldest = Int(startSeconds * Double(actualFPS))
-        
-        // Return whichever is greater: the 5-minute math limit, or the pruned limit.
+
         return max(mathOldest, prunedOldest)
     }
 
     // MARK: - Clip mode
-
     private func enterClipMode() {
         guard let buf = videoFileBuffer else { return }
 
@@ -1048,19 +1277,25 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         clipSaveButton.setImage(UIImage(systemName: "arrow.down.to.line.circle.fill", withConfiguration: cfg), for: .normal)
         clipSaveButton.tintColor = .white
 
-        // Reorder z-index: the playhead area goes down first, so its massive
-        // 44pt invisible touch zone doesn't smother the handles at the edges.
+        cancelClipButton.isHidden = false
+        bucketDivider.isHidden = false
+        bucket1Button.isHidden = false
+        bucket2Button.isHidden = false
+        splitScreenButton.isHidden = false
+
+        refreshBucketIcons()
+        updateSplitIconForCurrentOrientation()
+
+        // Reorder z-index: keep gesture areas from smothering handles.
         timelineContainer.bringSubviewToFront(playheadTouchArea)
         timelineContainer.bringSubviewToFront(clipPlayhead)
-        
-        // Trim handles go on top. They are only 20pts wide, so they must
-        // win any gesture collisions at the immediate edges.
         timelineContainer.bringSubviewToFront(leftTrimHandle)
         timelineContainer.bringSubviewToFront(rightTrimHandle)
 
         UIView.animate(withDuration: 0.3) {
             self.scrubberBackground.alpha = 0
             self.scrubberPlayhead.alpha = 0
+
             self.clipRegionBackground.isHidden = false
             self.leftDimView.isHidden = false
             self.rightDimView.isHidden = false
@@ -1069,7 +1304,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             self.topBorder.isHidden = false
             self.bottomBorder.isHidden = false
             self.clipPlayhead.isHidden = false
-            self.cancelClipButton.isHidden = false
         }
 
         updateClipHandlePositions()
@@ -1079,23 +1313,99 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     private func exitClipMode() {
         scrubberPosition = clipPlayheadPosition
-        exitClipModeClean()
+        exitClipModeClean(shouldDeleteTempClips: true) // ensure true here
         seekPlayer(toFrameIndex: scrubberPosition, completion: nil)
         updateScrubberPlayheadPosition()
         updateTimeLabel()
     }
 
-    private func exitClipModeClean() {
+    // MARK: - Split restore helper
+    func restoreClipModeAfterSplit() {
+        guard let buf = videoFileBuffer else { return }
+
+        // Recompute valid bounds
+        let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames = buf.getCurrentFrameCount()
+        let requiredFrames = delaySeconds * fps
+        let pausePoint = max(0, totalFrames - requiredFrames)
+        let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
+
+        // Clamp existing indices to safe range (we keep previous clipStartIndex/endIndex/playhead)
+        clipStartIndex = max(oldest, min(clipStartIndex, pausePoint))
+        clipEndIndex = max(clipStartIndex + 1, min(clipEndIndex, pausePoint))
+        clipPlayheadPosition = min(max(clipPlayheadPosition, clipStartIndex), clipEndIndex)
+
+        // Reâ€‘enter clip mode UI with same selection, buckets untouched
+        isClipMode = true
+
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
+        clipSaveButton.setImage(UIImage(systemName: "arrow.down.to.line.circle.fill", withConfiguration: cfg), for: .normal)
+        clipSaveButton.tintColor = .white
+
+        cancelClipButton.isHidden = false
+        bucketDivider.isHidden = false
+        bucket1Button.isHidden = false
+        bucket2Button.isHidden = false
+        splitScreenButton.isHidden = false
+
+        refreshBucketIcons()
+        updateSplitIconForCurrentOrientation()
+
+        UIView.animate(withDuration: 0.3) {
+            self.scrubberBackground.alpha = 0
+            self.scrubberPlayhead.alpha = 0
+
+            self.clipRegionBackground.isHidden = false
+            self.leftDimView.isHidden = false
+            self.rightDimView.isHidden = false
+            self.leftTrimHandle.isHidden = false
+            self.rightTrimHandle.isHidden = false
+            self.topBorder.isHidden = false
+            self.bottomBorder.isHidden = false
+            self.clipPlayhead.isHidden = false
+        }
+
+        updateClipHandlePositions()
+        updatePlayheadPosition()
+        updateTimeLabel()
+    }
+
+    func resetUIAndTearDown() {
+        if isLooping { stopLoop() }
+        if isClipMode { exitClipModeClean(shouldDeleteTempClips: true) }
+
+        // Also ensure no lingering temps if we somehow werenâ€™t in clip mode:
+        cleanupTempSplitClips()
+
+        tearDownPlayer()
+        bufferLimitLabel.isHidden = true
+        bufferLimitLabel.alpha = 0
+        hideControls()
+    }
+
+    private func exitClipModeClean(shouldDeleteTempClips: Bool) {
         isClipMode = false
+
         cancelClipButton.isHidden = true
+        bucketDivider.isHidden = true
+        bucket1Button.isHidden = true
+        bucket2Button.isHidden = true
+        splitScreenButton.isHidden = true
 
         let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
         clipSaveButton.setImage(UIImage(systemName: "film.circle.fill", withConfiguration: cfg), for: .normal)
         clipSaveButton.tintColor = .white
 
+        if shouldDeleteTempClips {
+            cleanupTempSplitClips()
+        } else {
+            refreshBucketIcons()
+        }
+
         UIView.animate(withDuration: 0.3) {
             self.scrubberBackground.alpha = 1
             self.scrubberPlayhead.alpha = 1
+
             self.clipRegionBackground.isHidden = true
             self.leftDimView.isHidden = true
             self.rightDimView.isHidden = true
@@ -1117,25 +1427,18 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
         let range = max(1, pausePoint - oldest)
 
-        // The safe area for the video timeline is the width MINUS both grabbers
         let safeWidth = timelineContainer.bounds.width - (handleWidth * 2)
         guard safeWidth > 0 else { return }
 
         let leftFrac = CGFloat(clipStartIndex - oldest) / CGFloat(range)
         let rightFrac = CGFloat(clipEndIndex - oldest) / CGFloat(range)
 
-        // Left handle constraint moves from 0 to safeWidth
         let leftX = leftFrac * safeWidth
-        
-        // Right handle constraint is trailing (negative), so it moves from 0 to -safeWidth
-        // If rightFrac is 1.0 (end of video), trailing is 0 (flush right).
-        // If rightFrac is 0.0 (start of video), trailing is -safeWidth.
         let rightX = (1.0 - rightFrac) * safeWidth
 
         leftHandleConstraint?.constant = leftX
         rightHandleConstraint?.constant = -rightX
 
-        // Ensure the purple background stretches exactly between the handles
         clipBackgroundLeadingConstraint?.constant = 0
         clipBackgroundTrailingConstraint?.constant = 0
 
@@ -1152,18 +1455,13 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
         let range = max(1, pausePoint - oldest)
 
-        // The playhead travels exclusively between the inner edges of the grabbers.
-        // We subtract `3` (the playhead width) so the body of the playhead doesn't
-        // spill underneath the right grabber when it hits 100%.
         let playheadWidth: CGFloat = 3
         let safeWidth = timelineContainer.bounds.width - (handleWidth * 2) - playheadWidth
         guard safeWidth > 0 else { return }
 
         let frac = CGFloat(clipPlayheadPosition - oldest) / CGFloat(range)
-        
-        // Offset by `handleWidth` so 0% starts exactly at the right edge of the left handle.
         let playheadX = (frac * safeWidth) + handleWidth
-        
+
         playheadConstraint?.constant = playheadX
         playheadWidthConstraint?.constant = playheadWidth
 
@@ -1181,13 +1479,11 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         let idx = isClipMode ? clipPlayheadPosition : scrubberPosition
         let clamped = min(max(idx, oldest), pausePoint)
-
         let secs = Float(clamped - oldest) / Float(max(fps, 1))
         timeLabel.text = VideoPlaybackHelpers.formatTime(secs)
     }
 
     // MARK: - Trim handle gestures
-
     @objc private func handleLeftTrimPan(_ gesture: UIPanGestureRecognizer) {
         guard isClipMode, let buf = videoFileBuffer else { return }
 
@@ -1197,6 +1493,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
         let range = max(1, pausePoint - oldest)
+
         let safeWidth = timelineContainer.bounds.width - (handleWidth * 2)
         guard safeWidth > 0 else { return }
 
@@ -1210,13 +1507,12 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             initialClipStartIndex = clipStartIndex
             clipPlayhead.alpha = 0
             playheadTouchArea.alpha = 0
-            
+
         case .changed:
             let newLeft = initialLeftPosition + tr.x
             let norm = max(0, min(newLeft / safeWidth, 1))
             let newStart = oldest + Int(norm * CGFloat(range))
 
-            // Keep it at least 1 second behind the right handle, and cap at oldest
             clipStartIndex = max(oldest, min(newStart, clipEndIndex - max(fps, 1)))
             clipPlayheadPosition = clipStartIndex
 
@@ -1224,23 +1520,22 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             updatePlayheadPosition()
             updateTimeLabel()
 
-            // Throttle player seeking
             let now = CACurrentMediaTime()
             if now - lastUpdateTime > 0.05 {
                 lastUpdateTime = now
                 seekPlayer(toFrameIndex: clipPlayheadPosition, completion: nil)
             }
-            
+
         case .ended, .cancelled:
             isDraggingHandle = false
             seekPlayer(toFrameIndex: clipPlayheadPosition, completion: nil)
-            
             UIView.animate(withDuration: 0.3) {
                 self.clipPlayhead.alpha = 1
                 self.playheadTouchArea.alpha = 1
             }
-            
-        default: break
+
+        default:
+            break
         }
     }
 
@@ -1253,6 +1548,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let pausePoint = max(0, totalFrames - requiredFrames)
         let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
         let range = max(1, pausePoint - oldest)
+
         let safeWidth = timelineContainer.bounds.width - (handleWidth * 2)
         guard safeWidth > 0 else { return }
 
@@ -1266,18 +1562,13 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             initialClipEndIndex = clipEndIndex
             clipPlayhead.alpha = 0
             playheadTouchArea.alpha = 0
-            
+
         case .changed:
-            // Calculate where the handle is from the LEFT side to get the proper fraction
-            // We calculate how far the handle's right edge is from the left container edge,
-            // subtract the handle sizes, and divide by safeWidth.
             let w = timelineContainer.bounds.width
             let currentFromLeft = w + initialRightPosition + tr.x
-            // Shift back by the space taken by both handles to find the normalized fraction
             let norm = max(0, min((currentFromLeft - (handleWidth * 2)) / safeWidth, 1))
             let newEnd = oldest + Int(norm * CGFloat(range))
 
-            // Keep it at least 1 second ahead of the left handle, and cap it at the pause point
             clipEndIndex = max(clipStartIndex + max(fps, 1), min(newEnd, pausePoint))
             clipPlayheadPosition = clipEndIndex
 
@@ -1285,18 +1576,16 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             updatePlayheadPosition()
             updateTimeLabel()
 
-            // Throttle the player seeking so it doesn't freeze while dragging
             let now = CACurrentMediaTime()
             if now - lastUpdateTime > 0.05 {
                 lastUpdateTime = now
                 seekPlayer(toFrameIndex: clipPlayheadPosition, completion: nil)
             }
-            
+
         case .ended, .cancelled:
             isDraggingHandle = false
             seekPlayer(toFrameIndex: clipPlayheadPosition, completion: nil)
 
-            // Update player end time to match the new clip end so it loops cleanly
             if let item = player?.currentItem {
                 item.forwardPlaybackEndTime = buf.compositionTime(forFrameIndex: clipEndIndex) ?? buf.pausedCompositionEndTime
             }
@@ -1305,8 +1594,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
                 self.clipPlayhead.alpha = 1
                 self.playheadTouchArea.alpha = 1
             }
-            
-        default: break
+
+        default:
+            break
         }
     }
 
@@ -1325,6 +1615,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             isDraggingHandle = true
             initialPlayheadPosition = playheadConstraint?.constant ?? 0
             initialClipPlayheadPosition = clipPlayheadPosition
+
         case .changed:
             let dx = gesture.translation(in: timelineContainer).x
             let newX = max(0, min(initialPlayheadPosition + dx, timelineContainer.bounds.width))
@@ -1336,8 +1627,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
             updatePlayheadPosition()
             updateTimeLabel()
-
             seekPlayer(toFrameIndex: clipPlayheadPosition, completion: nil)
+
         default:
             isDraggingHandle = false
         }
@@ -1356,6 +1647,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let loc = gesture.location(in: timelineContainer)
         let x = max(0, min(loc.x, timelineContainer.bounds.width))
         let frac = x / max(timelineContainer.bounds.width, 1)
+
         let range = pausePoint - oldest
         let idx = oldest + Int(frac * CGFloat(range))
 
@@ -1372,22 +1664,21 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Save clip to Photos
-
     private func saveClipToPhotos() {
         guard let buf = videoFileBuffer else { return }
-        
+
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
         let frames = clipEndIndex - clipStartIndex
         let secs = frames / max(fps, 1)
 
         let executeExport = { [weak self] in
-            guard let self = self else { return }
-            let overlay = self.createLoadingView(text: "Saving…")
+            guard let self else { return }
+
+            let overlay = self.createLoadingView(text: "Savingâ€¦")
             self.addSubview(overlay)
             overlay.frame = self.bounds
-            
+
             let angle = self.recordedRotationAngle
-            
             VideoExportManager.exportAndSaveClip(
                 from: buf,
                 startIndex: self.clipStartIndex,
@@ -1397,7 +1688,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
                 fps: fps
             ) { result in
                 overlay.removeFromSuperview()
-                
+
                 switch result {
                 case .success():
                     self.showSuccessFeedback()
@@ -1444,7 +1735,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Loading view / error helpers
-
     private func createLoadingView(text: String) -> UIView {
         let v = UIView()
         v.backgroundColor = UIColor.black.withAlphaComponent(0.6)
@@ -1470,6 +1760,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 12),
             label.centerXAnchor.constraint(equalTo: v.centerXAnchor)
         ])
+
         return v
     }
 
@@ -1480,7 +1771,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - UIGestureRecognizerDelegate
-
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
@@ -1491,7 +1781,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - Parent VC helper
-
     private var parentViewController: UIViewController? {
         var r: UIResponder? = self
         while let next = r?.next {
@@ -1501,3 +1790,22 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         return nil
     }
 }
+
+// MARK: - Temp split clip exporter (mp4 in /tmp)
+enum SplitTempClipExportError: LocalizedError {
+    case missingComposition
+    case exporterCreationFailed
+    case exportFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingComposition:
+            return "Video buffer or composition is missing."
+        case .exporterCreationFailed:
+            return "Could not create an export session."
+        case .exportFailed(let msg):
+            return "Export failed: \(msg)"
+        }
+    }
+}
+

@@ -303,8 +303,50 @@ final class DelayedCameraView: UIView {
         countdownStopButton.addTarget(self, action: #selector(countdownStopTapped), for: .touchUpInside)
         livePauseButton.addTarget(self, action: #selector(livePauseTapped), for: .touchUpInside)
 
-        recordedView.onRestartRequested = { [weak self] in self?.restartCountdown() }
-        recordedView.onStopSessionRequested = { [weak self] in self?.stopSession() }
+        //recordedView.onRestartRequested = { [weak self] in self?.restartCountdown() }
+        //recordedView.onStopSessionRequested = { [weak self] in self?.stopSession() }
+        
+        recordedView.onRestartRequested = { [weak self] in
+            self?.restartCountdown()
+        }
+
+        recordedView.onStopSessionRequested = { [weak self] in
+            self?.stopSession()
+        }
+
+        recordedView.onSplitScreenRequested = { [weak self] leftURL, rightURL in
+            guard let self else { return }
+
+            let splitVC = SplitVideoView(leftURL: leftURL, rightURL: rightURL)
+
+            // Back: just return to clipping UI in same state, temps intact.
+            splitVC.onDismiss = { [weak self] in
+                guard let self else { return }
+                self.recordedView.restoreClipModeAfterSplit()
+            }
+
+            // Restart: tell delayed camera to restart, THEN dismiss split view.
+            splitVC.onRestartRequested = { [weak splitVC, weak self] in
+                guard let self else { return }
+
+                // Trigger your existing restart logic.
+                self.restartCountdown()
+
+                // Once restart UI is in place, dismiss split.
+                splitVC?.dismiss(animated: true, completion: nil)
+            }
+
+            // End session: stop session, THEN dismiss split view.
+            splitVC.onStopSessionRequested = { [weak splitVC, weak self] in
+                guard let self else { return }
+
+                self.stopSession()
+
+                splitVC?.dismiss(animated: true, completion: nil)
+            }
+
+            self.parentViewController?.present(splitVC, animated: true)
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -825,6 +867,15 @@ final class DelayedCameraView: UIView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.forceOrientationUpdate()
         }
+    }
+    
+    private var parentViewController: UIViewController? {
+        var r: UIResponder? = self
+        while let next = r?.next {
+            if let vc = next as? UIViewController { return vc }
+            r = next
+        }
+        return nil
     }
 }
 
