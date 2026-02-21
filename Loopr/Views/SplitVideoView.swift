@@ -79,10 +79,11 @@ final class SplitVideoView: UIViewController {
         let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
         b.setImage(UIImage(systemName: "film.circle", withConfiguration: cfg), for: .normal)
         b.setTitle(" Edit", for: .normal)
-        b.tintColor = .white
-        b.setTitleColor(.white, for: .normal)
+        b.tintColor = .systemGray
+        b.setTitleColor(.systemGray, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
         b.backgroundColor = .clear
+        b.isEnabled = false
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }()
@@ -358,13 +359,13 @@ final class SplitVideoView: UIViewController {
 
     private func updateLinkButtonState() {
         let bothLoaded = (leftPlayer != nil && rightPlayer != nil)
-        
+        let eitherLoaded = (leftPlayer != nil || rightPlayer != nil)
+
         if !bothLoaded && isLinked {
             linkTapped()
         }
-        
+
         linkButton.isEnabled = bothLoaded
-        
         if bothLoaded {
             let color: UIColor = isLinked ? .systemYellow : .white
             linkButton.tintColor = color
@@ -372,6 +373,16 @@ final class SplitVideoView: UIViewController {
         } else {
             linkButton.tintColor = .systemGray
             linkButton.setTitleColor(.systemGray, for: .normal)
+        }
+
+        editButton.isEnabled = eitherLoaded
+        if !eitherLoaded {
+            // Ensure edit button resets to gray when no videos loaded
+            editButton.tintColor = .systemGray
+            editButton.setTitleColor(.systemGray, for: .normal)
+        } else if !isEditMode {
+            editButton.tintColor = .white
+            editButton.setTitleColor(.white, for: .normal)
         }
         
         // Force layout to recalculate the button width after text changes
@@ -716,6 +727,15 @@ final class SplitVideoView: UIViewController {
             }
         }
         
+        // If in edit mode and neither side has a video left, auto-exit edit mode
+        if isEditMode && leftPlayer == nil && rightPlayer == nil {
+            isEditMode = false
+            leftContainer.toggleEditMode()
+            rightContainer.toggleEditMode()
+            editButton.tintColor = .white
+            editButton.setTitleColor(.white, for: .normal)
+        }
+
         updateLinkButtonState()
     }
 
