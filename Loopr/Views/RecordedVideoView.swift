@@ -1675,7 +1675,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let executeExport = { [weak self] in
             guard let self else { return }
 
-            let overlay = self.createLoadingView(text: "Saving...")
+            let overlay = self.createLoadingView(text: "Saving to Photos")
             self.addSubview(overlay)
             overlay.frame = self.bounds
 
