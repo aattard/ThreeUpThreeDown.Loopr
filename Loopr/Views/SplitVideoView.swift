@@ -317,6 +317,23 @@ final class SplitVideoView: UIViewController {
     
     // MARK: - Core Logic
 
+    private func removeLeftObservers() {
+        // Remove the periodic time observer from the current leftPlayer
+        if let obs = leftTimeObserver {
+            leftPlayer?.removeTimeObserver(obs)
+            leftTimeObserver = nil
+        }
+        // Also remove the boundary observer from the current leftPlayer
+        removeBoundaryObserver()
+    }
+
+    private func removeRightObservers() {
+        if let obs = rightTimeObserver {
+            rightPlayer?.removeTimeObserver(obs)
+            rightTimeObserver = nil
+        }
+    }
+    
     private func configurePlayers() {
         configureLeftPlayer()
         configureRightPlayer()
@@ -324,6 +341,11 @@ final class SplitVideoView: UIViewController {
     }
 
     private func configureLeftPlayer() {
+        // CLEANUP FIRST: Remove observers from the existing instance before replacing it
+        removeLeftObservers()
+        leftPlayer?.pause()
+        leftPlayer = nil
+
         if let url = leftURL {
             leftContainer.showVideo()
             leftContainer.resetPlayState()
@@ -338,6 +360,11 @@ final class SplitVideoView: UIViewController {
     }
 
     private func configureRightPlayer() {
+        // CLEANUP FIRST
+        removeRightObservers()
+        rightPlayer?.pause()
+        rightPlayer = nil
+
         if let url = rightURL {
             rightContainer.showVideo()
             rightContainer.resetPlayState()
@@ -540,10 +567,13 @@ final class SplitVideoView: UIViewController {
     }
 
     private func tearDownPlayers() {
-        removeBoundaryObserver()
-        if let obs = leftTimeObserver { leftPlayer?.removeTimeObserver(obs) }
-        if let obs = rightTimeObserver { rightPlayer?.removeTimeObserver(obs) }
-        leftPlayer?.pause(); rightPlayer?.pause()
+        removeLeftObservers()
+        removeRightObservers()
+
+        leftPlayer?.pause()
+        leftPlayer = nil
+        rightPlayer?.pause()
+        rightPlayer = nil
     }
 
     @objc private func closeTapped() { tearDownPlayers(); dismiss(animated: true) { self.onDismiss?() } }
@@ -581,10 +611,27 @@ final class SplitVideoView: UIViewController {
     }
 
     @objc private func handleRemoveNotification(_ notification: Notification) {
-        guard let container = notification.userInfo?["container"] as? VideoPaneView else { return }
-        if isLinked { linkTapped() }
-        if container === leftContainer { leftPlayer = nil; leftContainer.clearPlayer(); leftContainer.showAddButton() }
-        else { rightPlayer = nil; rightContainer.clearPlayer(); rightContainer.showAddButton() }
+        guard let userInfo = notification.userInfo,
+              let container = userInfo["container"] as? VideoPaneView else { return }
+
+        if isLinked { linkTapped() } // Unlink first
+
+        if container === leftContainer {
+            removeLeftObservers() // Clean up observers while leftPlayer still exists
+            leftPlayer?.pause()
+            leftPlayer = nil
+            leftURL = nil
+            leftContainer.clearPlayer()
+            leftContainer.showAddButton()
+        } else if container === rightContainer {
+            removeRightObservers() // Clean up observers while rightPlayer still exists
+            rightPlayer?.pause()
+            rightPlayer = nil
+            rightURL = nil
+            rightContainer.clearPlayer()
+            rightContainer.showAddButton()
+        }
+        
         updateLinkButtonState()
     }
     
@@ -604,10 +651,31 @@ final class SplitVideoView: UIViewController {
     }
     
     private func updateLinkButtonState() {
-        let both = (leftPlayer != nil && rightPlayer != nil)
-        linkButton.isEnabled = both
-        linkButton.tintColor = both ? (isLinked ? .systemYellow : .white) : .systemGray
-        editButton.isEnabled = (leftPlayer != nil || rightPlayer != nil)
+        let bothPlayersExist = (leftPlayer != nil && rightPlayer != nil)
+        let anyPlayerExists = (leftPlayer != nil || rightPlayer != nil)
+        
+        // 1. Update Link Button state and color
+        linkButton.isEnabled = bothPlayersExist
+        linkButton.tintColor = bothPlayersExist ? (isLinked ? .systemYellow : .white) : .systemGray
+        
+        // 2. Update Edit Button state
+        editButton.isEnabled = anyPlayerExists
+        
+        // 3. FIX: Update Edit Button color so it doesn't stay gray when enabled
+        if anyPlayerExists {
+            // If enabled, use Yellow if active, otherwise White
+            editButton.tintColor = isEditMode ? .systemYellow : .white
+        } else {
+            // If no videos exist, button must be gray
+            editButton.tintColor = .systemGray
+            
+            // Safety: If all videos were removed, force exit Edit Mode
+            if isEditMode {
+                isEditMode = false
+                leftContainer.toggleEditMode()
+                rightContainer.toggleEditMode()
+            }
+        }
     }
 
     private func updateStackAxisForOrientation() {
@@ -622,14 +690,51 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
         picker.dismiss(animated: true)
     }
     func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+        defer {
+            if picker.view.tag == 1 { leftContainer.hideLoading() } else { rightContainer.hideLoading() }
+            picker.dismiss(animated: true)
+        }
         guard let url = info[.mediaURL] as? URL else { return }
-        let forLeft = (picker.view.tag == 1)
-        if forLeft { leftURL = url; configureLeftPlayer() } else { rightURL = url; configureRightPlayer() }
-        picker.dismiss(animated: true) { forLeft ? self.leftContainer.hideLoading() : self.rightContainer.hideLoading() }
+
+        if isLinked { linkTapped() }
+        
+        if picker.view.tag == 1 { // Left Side
+            removeLeftObservers() // REMOVE OLD OBSERVER BEFORE CREATING NEW PLAYER
+            leftURL = url
+            let player = AVPlayer(url: url)
+            leftPlayer = player
+            leftContainer.showVideo()
+            leftContainer.resetPlayState()
+            leftContainer.playerView.player = player
+            addTimeObserver(for: player, isLeft: true)
+            setupDial(for: leftContainer, player: player)
+        } else { // Right Side
+            removeRightObservers() // REMOVE OLD OBSERVER BEFORE CREATING NEW PLAYER
+            rightURL = url
+            let player = AVPlayer(url: url)
+            rightPlayer = player
+            rightContainer.showVideo()
+            rightContainer.resetPlayState()
+            rightContainer.playerView.player = player
+            addTimeObserver(for: player, isLeft: false)
+            setupDial(for: rightContainer, player: player)
+        }
+        updateLinkButtonState()
     }
     
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        let excluded: [UIView] = [closeButtonContainer, topRightContainer, sharedControlsContainer, leftContainer.controlsContainer, rightContainer.controlsContainer]
+        let excluded: [UIView] = [
+            closeButtonContainer,
+            topRightContainer,
+            sharedControlsContainer,
+            leftContainer.controlsContainer,
+            rightContainer.controlsContainer,
+            // ADDED: Explicitly exclude add/remove buttons
+            leftContainer.addButton,
+            leftContainer.removeButton,
+            rightContainer.addButton,
+            rightContainer.removeButton
+        ]
         for v in excluded { if touch.view?.isDescendant(of: v) == true { return false } }
         return true
     }
