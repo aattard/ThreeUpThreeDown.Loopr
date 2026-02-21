@@ -49,6 +49,11 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     private var isDraggingHandle: Bool = false
     private var lastUpdateTime: TimeInterval = 0
 
+    // MARK: - Zoom / pan
+    private let zoomContainer = UIView()
+    private var currentZoomScale: CGFloat = 1.0
+    private var currentZoomTranslation: CGPoint = .zero
+
     // MARK: - Config
     private var scrubDurationSeconds: Int { Settings.shared.bufferDurationSeconds }
     private var scrubberGrabOffsetX: CGFloat = 0
@@ -420,6 +425,19 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         super.init(frame: frame)
         backgroundColor = .black
 
+        // zoomContainer sits beneath everything — playerLayer lives inside it
+        clipsToBounds = true
+        zoomContainer.clipsToBounds = true
+        zoomContainer.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(zoomContainer)
+        sendSubviewToBack(zoomContainer)
+        NSLayoutConstraint.activate([
+            zoomContainer.topAnchor.constraint(equalTo: topAnchor),
+            zoomContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            zoomContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
+            zoomContainer.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+
         addSubview(successFeedbackView)
         setupControls()
 
@@ -430,7 +448,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             successFeedbackView.heightAnchor.constraint(equalToConstant: 200)
         ])
 
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap)))
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        addGestureRecognizer(tapGesture)
+
+        setupZoomGestures()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
@@ -443,7 +464,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
 
-        playerLayer?.frame = bounds
+        // playerLayer must fill zoomContainer (AutoLayout positions zoomContainer itself)
+        // Do NOT set zoomContainer.frame manually — its AutoLayout constraints handle that.
+        playerLayer?.frame = zoomContainer.bounds
         applyPlayerTransformNow()
 
         // Force the timeline to figure out its new width FIRST, so bounds.width is accurate.
@@ -480,6 +503,11 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         self.isFrontCamera = isFrontCamera
         self.recordedRotationAngle = recordedRotationAngle
 
+        // Reset zoom whenever a new recording is presented
+        currentZoomScale = 1.0
+        currentZoomTranslation = .zero
+        zoomContainer.transform = .identity
+
         scrubberPosition = initialScrubberIndex
         clipStartIndex = 0
         clipEndIndex = 0
@@ -508,14 +536,19 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         seekPlayer(toFrameIndex: scrubberPosition, completion: nil)
         updateScrubberPlayheadPosition()
         updateTimeLabel()
+
+        // Re-apply zoom transform after layout settles
+        DispatchQueue.main.async { self.applyZoomTransform() }
     }
 
     // MARK: - Player transform
     func applyPlayerTransformNow() {
         guard let pl = playerLayer else { return }
 
+        // Reset the layer's own transform (rotation/mirror handled by videoComposition)
+        // Use zoomContainer.bounds — playerLayer lives inside zoomContainer, not self
         pl.setAffineTransform(.identity)
-        pl.frame = bounds
+        pl.frame = zoomContainer.bounds.isEmpty ? bounds : zoomContainer.bounds
 
         let currentOri = UIApplication.shared.windows.first?.windowScene?.interfaceOrientation
         let isAppPortrait = currentOri == .portrait || currentOri == .portraitUpsideDown || currentOri == .unknown
@@ -1014,8 +1047,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         let pl = AVPlayerLayer(player: p)
         pl.videoGravity = .resizeAspectFill
-        layer.insertSublayer(pl, at: 0)
+        zoomContainer.layer.insertSublayer(pl, at: 0)
         self.playerLayer = pl
+        // Set frame immediately in case layoutSubviews hasn't run yet
+        pl.frame = zoomContainer.bounds.isEmpty ? bounds : zoomContainer.bounds
 
         applyPlayerTransformNow()
 
@@ -1310,6 +1345,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         updateClipHandlePositions()
         updatePlayheadPosition()
         updateTimeLabel()
+
+        // Re-apply zoom transform after layout settles so the video stays in place
+        DispatchQueue.main.async { self.applyZoomTransform() }
     }
 
     private func exitClipMode() {
@@ -1369,6 +1407,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         updateClipHandlePositions()
         updatePlayheadPosition()
         updateTimeLabel()
+
+        DispatchQueue.main.async { self.applyZoomTransform() }
     }
 
     func resetUIAndTearDown() {
@@ -1771,14 +1811,74 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         parentViewController?.present(alert, animated: true)
     }
 
+    // MARK: - Zoom gestures
+    private func setupZoomGestures() {
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handleZoomPinch(_:)))
+        let pan   = UIPanGestureRecognizer(target: self, action: #selector(handleZoomPan(_:)))
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(resetZoom))
+        doubleTap.numberOfTapsRequired = 2
+
+        pan.minimumNumberOfTouches = 1  // 1-finger drag when zoomed in; guard in handler prevents conflict at 1x
+        pan.maximumNumberOfTouches = 2
+        pinch.delegate = self
+        pan.delegate   = self
+
+        addGestureRecognizer(pinch)
+        addGestureRecognizer(pan)
+        addGestureRecognizer(doubleTap)
+    }
+
+    @objc private func resetZoom() {
+        currentZoomScale = 1.0
+        currentZoomTranslation = .zero
+        UIView.animate(withDuration: 0.3) {
+            self.zoomContainer.transform = .identity
+        }
+    }
+
+    @objc private func handleZoomPinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .changed, .ended:
+            currentZoomScale = max(1.0, min(currentZoomScale * gesture.scale, 6.0))
+            gesture.scale = 1.0
+            applyZoomTransform()
+        default:
+            break
+        }
+    }
+
+    @objc private func handleZoomPan(_ gesture: UIPanGestureRecognizer) {
+        guard currentZoomScale > 1.0 else { return }
+        let delta = gesture.translation(in: self)
+        currentZoomTranslation.x += delta.x
+        currentZoomTranslation.y += delta.y
+        gesture.setTranslation(.zero, in: self)
+        clampZoomTranslation()
+        applyZoomTransform()
+    }
+
+    private func applyZoomTransform() {
+        zoomContainer.transform = CGAffineTransform(scaleX: currentZoomScale, y: currentZoomScale)
+            .translatedBy(x: currentZoomTranslation.x / currentZoomScale,
+                          y: currentZoomTranslation.y / currentZoomScale)
+    }
+
+    private func clampZoomTranslation() {
+        let maxX = (bounds.width  * (currentZoomScale - 1)) / 2
+        let maxY = (bounds.height * (currentZoomScale - 1)) / 2
+        currentZoomTranslation.x = max(-maxX, min(currentZoomTranslation.x, maxX))
+        currentZoomTranslation.y = max(-maxY, min(currentZoomTranslation.y, maxY))
+    }
+
     // MARK: - UIGestureRecognizerDelegate
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
-        // Allow the scrubber pan to work alongside the tap gesture,
-        // but only when we aren't in clip mode (to prevent dragging conflicts).
-        return !isClipMode
+        // Always allow pinch and zoom-pan to coexist with each other and the scrubber.
+        // The zoom-pan handler already guards on currentZoomScale > 1.0, so at 1x it
+        // is a no-op and the scrubber pan wins naturally.
+        return true
     }
 
     // MARK: - Parent VC helper
@@ -1809,4 +1909,3 @@ enum SplitTempClipExportError: LocalizedError {
         }
     }
 }
-
