@@ -89,7 +89,7 @@ final class FrameDial: UIView {
         // How many ticks fit across the dial (add generous padding so ticks
         // extend edge-to-edge even when partially scrolled)
         let totalTicks = Int(w / pointsPerFrame) + 4
-        let startOffset = -visualOffset.truncatingRemainder(dividingBy: pointsPerFrame)
+        let startOffset = visualOffset.truncatingRemainder(dividingBy: pointsPerFrame)
 
         ctx.setLineWidth(lineW)
         ctx.setLineCap(.round)
@@ -100,9 +100,9 @@ final class FrameDial: UIView {
         for i in 0...totalTicks {
             let x = startOffset + CGFloat(i) * pointsPerFrame
 
-            // Which absolute frame index does this tick correspond to?
-            // (purely visual — we just need to know if it should be major)
-            let absFrame = Int((visualOffset + CGFloat(i) * pointsPerFrame) / pointsPerFrame)
+            // 2. Subtract the visual offset's frame equivalent.
+            // This ensures that as the physical lines move right, their assigned frame numbers don't jump backward.
+            let absFrame = i - Int(visualOffset / pointsPerFrame)
             let isMajor = (absFrame % tickEvery == 0)
 
             let tickH = isMajor ? majorH : minorH
