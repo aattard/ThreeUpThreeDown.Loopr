@@ -420,6 +420,7 @@ final class SplitVideoView: UIViewController {
             leftPlayer = player
             leftContainer.playerView.player = player
             addTimeObserver(for: player, isLeft: true)
+            setupDial(for: leftContainer, player: player)
         } else {
             leftContainer.showAddButton()
         }
@@ -433,8 +434,92 @@ final class SplitVideoView: UIViewController {
             rightPlayer = player
             rightContainer.playerView.player = player
             addTimeObserver(for: player, isLeft: false)
+            setupDial(for: rightContainer, player: player)
         } else {
             rightContainer.showAddButton()
+        }
+    }
+
+    /// Wire a FrameDial to a player: step by one frame, clamp to duration.
+    private func setupDial(for container: VideoPaneView, player: AVPlayer) {
+        // Wait until duration is known
+        player.currentItem?.asset.loadValuesAsynchronously(forKeys: ["duration"]) { [weak self, weak player, weak container] in
+            guard let self, let player, let container else { return }
+            DispatchQueue.main.async {
+                guard let item = player.currentItem,
+                      let dur = item.duration as CMTime?,
+                      CMTIME_IS_NUMERIC(dur) else { return }
+                let fps = 30.0  // display fps for frame stepping
+                let total = max(1, Int(CMTimeGetSeconds(dur) * fps))
+                container.frameDial.totalFrames = total
+                container.frameDial.currentFrame = Int(CMTimeGetSeconds(player.currentTime()) * fps)
+
+                // Track current position locally so rapid steps don't query
+                // stale currentTime() while async seeks are still resolving.
+                var trackedSeconds = CMTimeGetSeconds(player.currentTime())
+
+                // Resync trackedSeconds from true player position at the start of each drag
+                container.frameDial.onDragBegan = { [weak player] in
+                    trackedSeconds = CMTimeGetSeconds(player?.currentTime() ?? .zero)
+                }
+
+                container.frameDial.onFrameStep = { [weak self, weak player, weak container] delta in
+                    guard let self, let player, let container else { return }
+                    // When linked, step BOTH players together
+                    if self.isLinked {
+                        self.stepLinkedFrame(delta: delta)
+                    } else {
+                        let fps = 30.0
+                        let newTime = max(0, trackedSeconds + Double(delta) / fps)
+                        trackedSeconds = newTime   // advance immediately, don't wait for seek
+                        let cmt = CMTime(seconds: newTime, preferredTimescale: 600)
+                        player.seek(to: cmt, toleranceBefore: .zero, toleranceAfter: .zero) { [weak container] _ in
+                            container?.frameDial.currentFrame = Int(newTime * fps)
+                        }
+                        // Update the slider above
+                        if let dur = player.currentItem?.duration, CMTIME_IS_NUMERIC(dur) {
+                            let total = CMTimeGetSeconds(dur)
+                            if total > 0 {
+                                container.scrubSlider.value = Float(newTime / total)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Step both linked players by one frame, honouring the sync offset.
+    private func stepLinkedFrame(delta: Int) {
+        guard let leftP = leftPlayer, let rightP = rightPlayer else { return }
+        let fps = 30.0
+        let frameDur = 1.0 / fps
+        let curLeft  = CMTimeGetSeconds(leftP.currentTime())
+        let newLeft  = curLeft + Double(delta) * frameDur
+        let newRight = newLeft + syncOffsetSeconds
+
+        // Clamp to valid window
+        let clampedLeft  = max(linkStartLeft - linkedWindowBack,
+                               min(newLeft, linkStartLeft + linkedWindowForward))
+        let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid)
+            ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
+        let clampedRight = max(0, min(newRight, rightDur))
+
+        leftP.seek(to:  CMTime(seconds: clampedLeft,  preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        rightP.seek(to: CMTime(seconds: clampedRight, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+
+        // Sync both dials
+        let leftFrame  = Int(clampedLeft  * fps)
+        let rightFrame = Int(clampedRight * fps)
+        leftContainer.frameDial.currentFrame  = leftFrame
+        rightContainer.frameDial.currentFrame = rightFrame
+
+        // Update shared scrub slider
+        if linkedWindowDuration > 0 {
+            let relSecs = clampedLeft - linkStartLeft
+            let sliderVal = Float((relSecs + linkedWindowBack) / linkedWindowDuration)
+            sharedScrubSlider.value = max(0, min(1, sliderVal))
+            sharedTimeLabel.text = formatRelativeTime(relSecs)
         }
     }
 
@@ -473,8 +558,10 @@ final class SplitVideoView: UIViewController {
                 } else {
                     if isLeft {
                         self.leftContainer.updateSlider(value: calculatedValue, currentTime: current, totalTime: 0)
+                        self.leftContainer.frameDial.currentFrame = Int(current * 30)
                     } else {
                         self.rightContainer.updateSlider(value: calculatedValue, currentTime: current, totalTime: 0)
+                        self.rightContainer.frameDial.currentFrame = Int(current * 30)
                     }
                 }
             }
@@ -919,6 +1006,7 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
             }
             if let player = leftPlayer {
                 addTimeObserver(for: player, isLeft: true)
+                setupDial(for: leftContainer, player: player)
             }
         } else {
             rightURL = url
@@ -933,6 +1021,7 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
             }
             if let player = rightPlayer {
                 addTimeObserver(for: player, isLeft: false)
+                setupDial(for: rightContainer, player: player)
             }
         }
         
@@ -983,6 +1072,7 @@ private final class VideoPaneView: UIView {
     let scrubSlider = UISlider()
     let timeLabel = UILabel()
     let loadingSpinner = UIActivityIndicatorView(style: .large)
+    let frameDial = FrameDial()
     
     private var isPlaying = false
     var isInEditMode = false
@@ -1099,6 +1189,8 @@ private final class VideoPaneView: UIView {
         controlsContainer.addSubview(playPauseButton)
         controlsContainer.addSubview(scrubSlider)
         controlsContainer.addSubview(timeLabel)
+        frameDial.translatesAutoresizingMaskIntoConstraints = false
+        controlsContainer.addSubview(frameDial)
 
         NSLayoutConstraint.activate([
             // zoomContainer fills the player area
@@ -1117,7 +1209,7 @@ private final class VideoPaneView: UIView {
             controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             controlsContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            controlsContainer.heightAnchor.constraint(equalToConstant: 48),
+            controlsContainer.heightAnchor.constraint(equalToConstant: 82),
 
             addButton.centerXAnchor.constraint(equalTo: playerView.centerXAnchor),
             addButton.centerYAnchor.constraint(equalTo: playerView.centerYAnchor),
@@ -1132,19 +1224,25 @@ private final class VideoPaneView: UIView {
             loadingSpinner.centerXAnchor.constraint(equalTo: playerView.centerXAnchor),
             loadingSpinner.centerYAnchor.constraint(equalTo: playerView.centerYAnchor),
 
-            // Controls inside container
+            // Row 1: play | scrub slider | time  (top half of container)
             playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 8),
-            playPauseButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
+            playPauseButton.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 6),
             playPauseButton.widthAnchor.constraint(equalToConstant: 32),
             playPauseButton.heightAnchor.constraint(equalToConstant: 32),
 
             timeLabel.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -12),
-            timeLabel.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
+            timeLabel.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
             timeLabel.widthAnchor.constraint(equalToConstant: 72),
 
             scrubSlider.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 10),
             scrubSlider.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -10),
-            scrubSlider.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor)
+            scrubSlider.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
+
+            // Row 2: frame dial centred at 75% of slider width
+            frameDial.centerXAnchor.constraint(equalTo: scrubSlider.centerXAnchor),
+            frameDial.widthAnchor.constraint(equalTo: scrubSlider.widthAnchor, multiplier: 0.75),
+            frameDial.topAnchor.constraint(equalTo: playPauseButton.bottomAnchor, constant: 4),
+            frameDial.heightAnchor.constraint(equalToConstant: 28)
         ])
     }
 

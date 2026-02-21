@@ -49,6 +49,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     private var isDraggingHandle: Bool = false
     private var lastUpdateTime: TimeInterval = 0
 
+    // MARK: - Frame dial
+    private let frameDial = FrameDial()
+
     // MARK: - Zoom / pan
     private let zoomContainer = UIView()
     private var currentZoomScale: CGFloat = 1.0
@@ -536,9 +539,50 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         seekPlayer(toFrameIndex: scrubberPosition, completion: nil)
         updateScrubberPlayheadPosition()
         updateTimeLabel()
+        setupFrameDial()
 
         // Re-apply zoom transform after layout settles
         DispatchQueue.main.async { self.applyZoomTransform() }
+    }
+
+    private func setupFrameDial() {
+        guard let buf = videoFileBuffer else { return }
+        let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+        let totalFrames = buf.getCurrentFrameCount()
+        let requiredFrames = delaySeconds * fps
+        let pausePoint = max(0, totalFrames - requiredFrames)
+        let oldest = oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
+        let displayableFrames = max(1, pausePoint - oldest)
+
+        frameDial.totalFrames  = displayableFrames
+        frameDial.currentFrame = max(0, scrubberPosition - oldest)
+
+        frameDial.onFrameStep = { [weak self] delta in
+            guard let self, let buf = self.videoFileBuffer else { return }
+            let fps = Settings.shared.currentFPS(isFrontCamera: self.isFrontCamera)
+            let totalFrames = buf.getCurrentFrameCount()
+            let requiredFrames = self.delaySeconds * fps
+            let pausePoint = max(0, totalFrames - requiredFrames)
+            let oldest = self.oldestAllowedIndex(totalFrames: totalFrames, pausePoint: pausePoint, fps: fps)
+
+            if self.isClipMode {
+                let newPos = self.clipPlayheadPosition + delta
+                let clamped = max(self.clipStartIndex, min(newPos, self.clipEndIndex))
+                self.clipPlayheadPosition = clamped
+                self.frameDial.currentFrame = max(0, clamped - oldest)
+                self.updatePlayheadPosition()
+                self.updateTimeLabel()
+                self.seekPlayer(toFrameIndex: clamped, completion: nil)
+            } else {
+                let newPos = self.scrubberPosition + delta
+                let clamped = max(oldest, min(newPos, pausePoint))
+                self.scrubberPosition = clamped
+                self.frameDial.currentFrame = max(0, clamped - oldest)
+                self.updateScrubberPlayheadPosition()
+                self.updateTimeLabel()
+                self.seekPlayer(toFrameIndex: clamped, completion: nil)
+            }
+        }
     }
 
     // MARK: - Player transform
@@ -567,6 +611,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         addSubview(topRightButtonContainer)
         addSubview(topLeftButtonContainer)
         addSubview(bufferLimitLabel)
+        frameDial.translatesAutoresizingMaskIntoConstraints = false
+        controlsContainer.addSubview(frameDial)
 
         // Bottom controls
         controlsContainer.addSubview(playPauseButton)
@@ -690,25 +736,32 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
             bucketDivider.heightAnchor.constraint(equalToConstant: 34),
 
-            // Bottom controls container
+            // Bottom controls container — taller to fit dial row
             controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             controlsContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
-            controlsContainer.heightAnchor.constraint(equalToConstant: 80),
+            controlsContainer.heightAnchor.constraint(equalToConstant: 116),
 
+            // Row 1: play | timeline | time  (pinned to top of container)
             playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 20),
-            playPauseButton.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
+            playPauseButton.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 10),
             playPauseButton.widthAnchor.constraint(equalToConstant: 44),
             playPauseButton.heightAnchor.constraint(equalToConstant: 44),
 
             timeLabel.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -20),
-            timeLabel.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
+            timeLabel.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
             timeLabel.widthAnchor.constraint(equalToConstant: 58),
 
             timelineContainer.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 10),
             timelineContainer.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -10),
-            timelineContainer.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor),
-            timelineContainer.heightAnchor.constraint(equalToConstant: 44),
+            timelineContainer.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
+            timelineContainer.heightAnchor.constraint(equalToConstant: 36),
+
+            // Row 2: frame dial — 75% of timeline width, centred below it
+            frameDial.centerXAnchor.constraint(equalTo: timelineContainer.centerXAnchor),
+            frameDial.widthAnchor.constraint(equalTo: timelineContainer.widthAnchor, multiplier: 0.75),
+            frameDial.topAnchor.constraint(equalTo: playPauseButton.bottomAnchor, constant: 6),
+            frameDial.heightAnchor.constraint(equalToConstant: 28),
 
             scrubberBackground.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
             scrubberBackground.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
@@ -1165,6 +1218,13 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             let fraction = (CMTimeGetSeconds(time) - startSecs) / rangeSecs
             clipPlayheadPosition = clipStartIndex + min(Int(fraction * Double(clipRange)), clipRange)
 
+            let fps2 = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
+            let tot2 = buf.getCurrentFrameCount()
+            let req2 = delaySeconds * fps2
+            let pp2  = max(0, tot2 - req2)
+            let old2 = oldestAllowedIndex(totalFrames: tot2, pausePoint: pp2, fps: fps2)
+            frameDial.currentFrame = max(0, clipPlayheadPosition - old2)
+
             updatePlayheadPosition()
             updateTimeLabel()
         } else {
@@ -1177,6 +1237,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
             scrubberPosition = oldest + Int(clamped * Double(scrubRange))
             scrubberPosition = min(scrubberPosition, pausePoint)
+
+            frameDial.currentFrame = max(0, scrubberPosition - oldest)
 
             updateScrubberPlayheadPosition()
             updateTimeLabel()
