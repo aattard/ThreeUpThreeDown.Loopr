@@ -740,7 +740,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             controlsContainer.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -10),
-            controlsContainer.heightAnchor.constraint(equalToConstant: 116),
+            controlsContainer.heightAnchor.constraint(equalToConstant: 98),
 
             // Row 1: play | timeline | time  (pinned to top of container)
             playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 20),
@@ -762,6 +762,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             frameDial.widthAnchor.constraint(equalTo: timelineContainer.widthAnchor, multiplier: 0.75),
             frameDial.topAnchor.constraint(equalTo: playPauseButton.bottomAnchor, constant: 6),
             frameDial.heightAnchor.constraint(equalToConstant: 28),
+            frameDial.bottomAnchor.constraint(equalTo: controlsContainer.bottomAnchor, constant: -10),
 
             scrubberBackground.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
             scrubberBackground.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
@@ -1933,13 +1934,27 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     }
 
     // MARK: - UIGestureRecognizerDelegate
-    func gestureRecognizer(
-        _ gestureRecognizer: UIGestureRecognizer,
-        shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
-    ) -> Bool {
-        // Always allow pinch and zoom-pan to coexist with each other and the scrubber.
-        // The zoom-pan handler already guards on currentZoomScale > 1.0, so at 1x it
-        // is a no-op and the scrubber pan wins naturally.
+    
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                            shouldReceive touch: UITouch) -> Bool {
+        // Only apply this exclusion to the zoom-pan gesture.
+        // The scrubber/clip pan gestures are on subviews and handle themselves.
+        guard gestureRecognizer.view === self else { return true }
+
+        // Exclude any touch that lands on the bottom controls container
+        // (scrubber, timeline, clip handles, frame dial, play button, time label)
+        // or the top UI containers.
+        let excludedViews: [UIView] = [
+            controlsContainer,
+            topLeftButtonContainer,
+            topRightButtonContainer
+        ]
+
+        for view in excludedViews {
+            if touch.view?.isDescendant(of: view) == true {
+                return false
+            }
+        }
         return true
     }
 

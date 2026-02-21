@@ -613,25 +613,31 @@ final class SplitVideoView: UIViewController {
     @objc private func handleRemoveNotification(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let container = userInfo["container"] as? VideoPaneView else { return }
-
         if isLinked { linkTapped() } // Unlink first
-
         if container === leftContainer {
-            removeLeftObservers() // Clean up observers while leftPlayer still exists
+            removeLeftObservers()
             leftPlayer?.pause()
             leftPlayer = nil
             leftURL = nil
             leftContainer.clearPlayer()
             leftContainer.showAddButton()
         } else if container === rightContainer {
-            removeRightObservers() // Clean up observers while rightPlayer still exists
+            removeRightObservers()
             rightPlayer?.pause()
             rightPlayer = nil
             rightURL = nil
             rightContainer.clearPlayer()
             rightContainer.showAddButton()
         }
-        
+
+        // ✅ Exit edit mode after a removal so the user doesn't stay in editing state
+        if isEditMode {
+            isEditMode = false
+            leftContainer.toggleEditMode()
+            rightContainer.toggleEditMode()
+            editButton.tintColor = .white
+        }
+
         updateLinkButtonState()
     }
     
