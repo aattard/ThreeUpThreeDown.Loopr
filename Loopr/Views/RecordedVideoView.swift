@@ -291,7 +291,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
         let img = UIImage(systemName: "chevron.backward.circle", withConfiguration: cfg)
         b.setImage(img, for: .normal)
-        b.setTitle(" Back", for: .normal) // space so text doesnâ€™t touch icon
+        //b.setTitle(" Back", for: .normal) // space so text doesnâ€™t touch icon
         b.tintColor = .white
         b.setTitleColor(.white, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
@@ -556,6 +556,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         // Use custom spacing to keep normal spacing around cancel/save and tight spacing around the buckets
         topLeftButtonStack.spacing = 6
+        topLeftButtonStack.setCustomSpacing(-6, after: cancelClipButton)
         topLeftButtonStack.setCustomSpacing(10, after: clipSaveButton)
         topLeftButtonStack.setCustomSpacing(-6, after: bucket1Button)
         topLeftButtonStack.setCustomSpacing(-6, after: bucket2Button)
@@ -891,7 +892,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
 
-        let overlay = createLoadingView(text: "Creating clipâ€¦")
+        let overlay = createLoadingView(text: "Creating clip...")
         addSubview(overlay)
         overlay.frame = bounds
 
@@ -1674,7 +1675,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let executeExport = { [weak self] in
             guard let self else { return }
 
-            let overlay = self.createLoadingView(text: "Savingâ€¦")
+            let overlay = self.createLoadingView(text: "Saving...")
             self.addSubview(overlay)
             overlay.frame = self.bounds
 

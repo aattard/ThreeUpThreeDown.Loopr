@@ -43,6 +43,11 @@ class InfoViewController: UIViewController {
             detail: "While paused, TAP the scissors icon to enter Clip mode. Trim the handles to your best moment, then save it directly to your Photos library."
         ),
         HowToCard(
+            icon: "rectangle.split.2x1",
+            action: "Split View",
+            detail: "TAP the split view icon to place two clips side by side. LINK them to scrub both simultaneously and compare moments in sync, or UNLINK to scrub each clip independently."
+        ),
+        HowToCard(
             icon: "arrow.counterclockwise.circle.fill",
             action: "Restart or End",
             detail: "TAP the restart icon to reset and run another delayed rep, or TAP the stop icon to end the session and return home."

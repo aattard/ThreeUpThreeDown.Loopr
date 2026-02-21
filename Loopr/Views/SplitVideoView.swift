@@ -26,15 +26,22 @@ final class SplitVideoView: UIViewController {
     private var rightTimeObserver: Any?
 
     private var isLinked: Bool = false
+    private var isEditMode: Bool = false
+    private var controlsVisible: Bool = true
     private var isSharedPlaying: Bool = false
     private var syncOffsetSeconds: Double = 0.0
+    private var linkStartLeft: Double = 0.0   // left position when link was established
+    private var linkStartRight: Double = 0.0  // right position when link was established
+    // Shared-scrub range: the window where BOTH videos have valid frames
+    private var linkedLeftMin: Double = 0.0
+    private var linkedLeftMax: Double = 0.0
 
     // MARK: - UI
 
     private let closeButtonContainer: UIView = {
         let v = UIView()
         v.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        v.layer.cornerRadius = 22 // 44 / 2
+        v.layer.cornerRadius = 32 // 64 / 2
         v.translatesAutoresizingMaskIntoConstraints = false
         v.clipsToBounds = true
         return v
@@ -45,7 +52,7 @@ final class SplitVideoView: UIViewController {
         let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular) // Match right side exactly
         let img = UIImage(systemName: "chevron.backward.circle", withConfiguration: cfg)
         b.setImage(img, for: .normal)
-        b.setTitle(" Back", for: .normal)
+        //b.setTitle(" Back", for: .normal)
         b.tintColor = .white
         b.setTitleColor(.white, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
@@ -205,6 +212,7 @@ final class SplitVideoView: UIViewController {
 
         setupUI()
         setupActions()
+        setupTapGesture()
         configurePlayers()
         
         // Listen for Remove button taps
@@ -252,17 +260,21 @@ final class SplitVideoView: UIViewController {
             // Left Container (Back & Link & Edit button)
             closeButtonContainer.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
             closeButtonContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
-            closeButtonContainer.heightAnchor.constraint(equalToConstant: 44),
-            closeButtonContainer.widthAnchor.constraint(equalToConstant: 320), // Widened for 3 buttons
-            
-            closeButton.leadingAnchor.constraint(equalTo: closeButtonContainer.leadingAnchor, constant: 12),
+            closeButtonContainer.heightAnchor.constraint(equalToConstant: 64),
+
+            closeButton.leadingAnchor.constraint(equalTo: closeButtonContainer.leadingAnchor, constant: 10),
             closeButton.centerYAnchor.constraint(equalTo: closeButtonContainer.centerYAnchor),
-            
-            linkButton.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 16),
-            linkButton.centerYAnchor.constraint(equalTo: closeButtonContainer.centerYAnchor),
-            
-            editButton.leadingAnchor.constraint(equalTo: linkButton.trailingAnchor, constant: 16),
+            closeButton.widthAnchor.constraint(equalToConstant: 44),
+            closeButton.heightAnchor.constraint(equalToConstant: 44),
+
+            editButton.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 4),
             editButton.centerYAnchor.constraint(equalTo: closeButtonContainer.centerYAnchor),
+            editButton.heightAnchor.constraint(equalToConstant: 44),
+
+            linkButton.leadingAnchor.constraint(equalTo: editButton.trailingAnchor, constant: 12),
+            linkButton.centerYAnchor.constraint(equalTo: closeButtonContainer.centerYAnchor),
+            linkButton.heightAnchor.constraint(equalToConstant: 44),
+            linkButton.trailingAnchor.constraint(equalTo: closeButtonContainer.trailingAnchor, constant: -16),
 
             // Top Right Container
             topRightContainer.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
@@ -329,6 +341,21 @@ final class SplitVideoView: UIViewController {
         sharedScrubSlider.addTarget(self, action: #selector(sharedSliderChanged(_:)), for: .valueChanged)
     }
     
+    private func setupTapGesture() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleViewTap))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        view.addGestureRecognizer(tap)
+    }
+
+    @objc private func handleViewTap() {
+        controlsVisible.toggle()
+        UIView.animate(withDuration: 0.25) {
+            self.closeButtonContainer.alpha = self.controlsVisible ? 1 : 0
+            self.topRightContainer.alpha = self.controlsVisible ? 1 : 0
+        }
+    }
+
     private func updateLinkButtonState() {
         let bothLoaded = (leftPlayer != nil && rightPlayer != nil)
         
@@ -416,13 +443,30 @@ final class SplitVideoView: UIViewController {
             DispatchQueue.main.async {
                 if self.isLinked {
                     if isLeft {
+                        // Update slider within the valid window
                         if !self.sharedScrubSlider.isTracking {
-                            // Assign explicitly
-                            self.sharedScrubSlider.value = calculatedValue
+                            let window = self.linkedLeftMax - self.linkedLeftMin
+                            if window > 0 {
+                                let sliderVal = Float((current - self.linkedLeftMin) / window)
+                                self.sharedScrubSlider.value = max(0, min(1, sliderVal))
+                            }
                         }
                         self.sharedTimeLabel.text = self.formatTime(current)
 
-                        if calculatedValue >= 0.99 && self.isSharedPlaying {
+                        // Freeze the right player if it would be out of its valid range
+                        if let rightP = self.rightPlayer {
+                            let rightTarget = current + self.syncOffsetSeconds
+                            let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid)
+                                ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
+                            if rightTarget < 0 || rightTarget > rightDur {
+                                rightP.pause()
+                            }
+                        }
+
+                        // Stop at end of valid window
+                        if current >= self.linkedLeftMax - 0.05 && self.isSharedPlaying {
+                            self.leftPlayer?.pause()
+                            self.rightPlayer?.pause()
                             self.isSharedPlaying = false
                             self.updateSharedPlayPauseIcon()
                         }
@@ -548,12 +592,31 @@ final class SplitVideoView: UIViewController {
 
         if isLinked {
             // Linked state
-            linkButton.setImage(UIImage(systemName: "link.circle.fill", withConfiguration: cfg), for: .normal)
+            linkButton.setImage(UIImage(systemName: "link.circle", withConfiguration: cfg), for: .normal)
             linkButton.setTitle(" Unlink", for: .normal)
             linkButton.tintColor = .systemYellow
             linkButton.setTitleColor(.systemYellow, for: .normal)
 
-            // Pause both to sync
+            // Capture start positions
+            let leftT  = CMTimeGetSeconds(leftP.currentTime())
+            let rightT = CMTimeGetSeconds(rightP.currentTime())
+            syncOffsetSeconds = rightT - leftT
+            linkStartLeft  = leftT
+            linkStartRight = rightT
+
+            // Determine the valid scrub window: the span where both videos have frames
+            let leftDur  = CMTIME_IS_NUMERIC(leftP.currentItem?.duration ?? .invalid)
+                ? CMTimeGetSeconds(leftP.currentItem!.duration) : 0
+            let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid)
+                ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
+
+            // In left-video time: right video is valid from (0 - offset) to (rightDur - offset)
+            linkedLeftMin = max(0, -syncOffsetSeconds)
+            linkedLeftMax = min(leftDur, rightDur - syncOffsetSeconds)
+            // Clamp start to valid window
+            if linkedLeftMax <= linkedLeftMin { linkedLeftMax = leftDur }
+
+            // Pause both
             leftP.pause()
             rightP.pause()
             leftContainer.resetPlayState()
@@ -561,23 +624,15 @@ final class SplitVideoView: UIViewController {
             isSharedPlaying = false
             updateSharedPlayPauseIcon()
 
-            // Calculate the exact offset between the two videos
-            let leftT = CMTimeGetSeconds(leftP.currentTime())
-            let rightT = CMTimeGetSeconds(rightP.currentTime())
-            syncOffsetSeconds = rightT - leftT
-
             // Swap UI
             leftContainer.controlsContainer.isHidden = true
             rightContainer.controlsContainer.isHidden = true
             sharedControlsContainer.isHidden = false
 
-            // Set initial shared slider state (Driven by Left Video)
-            if let dur = leftP.currentItem?.duration, CMTIME_IS_NUMERIC(dur) {
-                let total = CMTimeGetSeconds(dur)
-                if total > 0 {
-                    sharedScrubSlider.value = Float(leftT / total)
-                }
-            }
+            // Set slider to current left position within the valid window
+            let window = linkedLeftMax - linkedLeftMin
+            let sliderVal = window > 0 ? Float((leftT - linkedLeftMin) / window) : 0
+            sharedScrubSlider.value = sliderVal.isNaN ? 0 : sliderVal
             sharedTimeLabel.text = formatTime(leftT)
 
         } else {
@@ -601,14 +656,33 @@ final class SplitVideoView: UIViewController {
     }
     
     @objc private func editTapped() {
+        isEditMode.toggle()
         leftContainer.toggleEditMode()
         rightContainer.toggleEditMode()
+        let color: UIColor = isEditMode ? .systemYellow : .white
+        editButton.tintColor = color
+        editButton.setTitleColor(color, for: .normal)
     }
 
     @objc private func handleRemoveNotification(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let container = userInfo["container"] as? VideoPaneView else { return }
-        
+
+        // If linked, cleanly unlink before tearing down the player
+        if isLinked {
+            isLinked = false
+            let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
+            linkButton.setImage(UIImage(systemName: "link.circle", withConfiguration: cfg), for: .normal)
+            linkButton.setTitle(" Link", for: .normal)
+            linkButton.tintColor = .white
+            linkButton.setTitleColor(.white, for: .normal)
+            sharedControlsContainer.isHidden = true
+            leftContainer.controlsContainer.isHidden = false
+            rightContainer.controlsContainer.isHidden = false
+            isSharedPlaying = false
+            updateSharedPlayPauseIcon()
+        }
+
         if container === leftContainer {
             leftURL = nil
             leftPlayer?.pause()
@@ -647,22 +721,37 @@ final class SplitVideoView: UIViewController {
 
     @objc private func sharedPlayPauseTapped() {
         guard let leftP = leftPlayer, let rightP = rightPlayer else { return }
-        
+
         if isSharedPlaying {
-            // Pause both
+            // Pause both, preserve positions
             leftP.pause()
             rightP.pause()
             isSharedPlaying = false
+            updateSharedPlayPauseIcon()
         } else {
-            // Seek both to start + play (restart behavior)
-            leftP.seek(to: .zero)
-            rightP.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: { _ in
+            // Check if we are at or past the end of the valid window
+            let currentLeft = CMTimeGetSeconds(leftP.currentTime())
+            let atEnd = currentLeft >= linkedLeftMax - 0.1
+
+            if atEnd {
+                // Restart from the original linked start positions
+                let timeL = CMTime(seconds: linkStartLeft,  preferredTimescale: 600)
+                let timeR = CMTime(seconds: linkStartRight, preferredTimescale: 600)
+                leftP.seek(to: timeL, toleranceBefore: .zero, toleranceAfter: .zero)
+                rightP.seek(to: timeR, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                    guard let self else { return }
+                    leftP.play()
+                    rightP.play()
+                    self.isSharedPlaying = true
+                    self.updateSharedPlayPauseIcon()
+                }
+            } else {
+                // Resume from current positions
                 leftP.play()
                 rightP.play()
-                self.isSharedPlaying = true
-                self.updateSharedPlayPauseIcon()
-            })
-            updateSharedPlayPauseIcon()  // Immediate feedback
+                isSharedPlaying = true
+                updateSharedPlayPauseIcon()
+            }
         }
     }
 
@@ -674,23 +763,49 @@ final class SplitVideoView: UIViewController {
 
     @objc private func sharedSliderChanged(_ sender: UISlider) {
         guard let leftP = leftPlayer, let rightP = rightPlayer else { return }
-        guard let leftDur = leftP.currentItem?.duration, CMTIME_IS_NUMERIC(leftDur) else { return }
 
-        let totalLeft = CMTimeGetSeconds(leftDur)
-        
-        // Calculate exact target times based on the offset
-        let targetLeft = Double(sender.value) * totalLeft
+        // Map slider 0→1 over the valid window
+        let window = linkedLeftMax - linkedLeftMin
+        guard window > 0 else { return }
+        let targetLeft  = linkedLeftMin + Double(sender.value) * window
         let targetRight = targetLeft + syncOffsetSeconds
 
-        // Update text instantly
+        // Clamp right to its valid range so it freezes at boundary instead of seeking out-of-bounds
+        let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid)
+            ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
+        let clampedRight = max(0, min(targetRight, rightDur))
+
         sharedTimeLabel.text = formatTime(targetLeft)
 
-        // Seek both players simultaneously!
-        let timeL = CMTime(seconds: targetLeft, preferredTimescale: 600)
-        let timeR = CMTime(seconds: targetRight, preferredTimescale: 600)
+        leftP.seek(to: CMTime(seconds: targetLeft,  preferredTimescale: 600),
+                   toleranceBefore: .zero, toleranceAfter: .zero)
+        rightP.seek(to: CMTime(seconds: clampedRight, preferredTimescale: 600),
+                   toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+}
 
-        leftP.seek(to: timeL, toleranceBefore: .zero, toleranceAfter: .zero)
-        rightP.seek(to: timeR, toleranceBefore: .zero, toleranceAfter: .zero)
+// MARK: - UIGestureRecognizerDelegate
+
+extension SplitVideoView: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // Ignore taps on any UIControl (buttons, sliders) or their container views
+        let excludedViews: [UIView] = [
+            closeButtonContainer,
+            topRightContainer,
+            sharedControlsContainer,
+            leftContainer.controlsContainer,
+            rightContainer.controlsContainer,
+            leftContainer.addButton,
+            rightContainer.addButton,
+            leftContainer.removeButton,
+            rightContainer.removeButton
+        ]
+        for excluded in excludedViews {
+            if touch.view?.isDescendant(of: excluded) == true {
+                return false
+            }
+        }
+        return true
     }
 }
 
@@ -951,19 +1066,32 @@ private final class VideoPaneView: UIView {
 
     @objc private func togglePlayPause() {
         guard let player = playerView.player else { return }
-        
+
         if player.rate > 0 {
             // Currently playing → pause
             player.pause()
             isPlaying = false
+            updatePlayPauseIcon()
         } else {
-            // Paused OR at end → restart from beginning and play
-            player.seek(to: .zero) { _ in
+            // Check if at or near the end
+            let duration = player.currentItem?.duration ?? .zero
+            let current = player.currentTime()
+            let atEnd = CMTIME_IS_NUMERIC(duration) && CMTIME_IS_NUMERIC(current)
+                && CMTimeGetSeconds(current) >= CMTimeGetSeconds(duration) - 0.1
+
+            if atEnd {
+                // At end → restart from beginning
+                player.seek(to: .zero) { _ in
+                    player.play()
+                    self.isPlaying = true
+                    self.updatePlayPauseIcon()
+                }
+            } else {
+                // Paused mid-video → resume from current position
                 player.play()
-                self.isPlaying = true
-                self.updatePlayPauseIcon()
+                isPlaying = true
+                updatePlayPauseIcon()
             }
-            updatePlayPauseIcon()  // Immediate visual feedback
         }
     }
     

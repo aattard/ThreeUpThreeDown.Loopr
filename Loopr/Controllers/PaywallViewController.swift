@@ -38,6 +38,12 @@ class PaywallViewController: UIViewController {
             color: purple
         ),
         FeatureCard(
+            icon: "rectangle.split.2x1",
+            title: "Split View",
+            description: "View two clips side by side. Link them to scrub in sync, or unlink to step through each independently.",
+            color: purple
+        ),
+        FeatureCard(
             icon: "camera.rotate",
             title: "Front & Back Camera",
             description: "Switch between front and back cameras. Set up behind the plate or down the third base line.",
@@ -210,19 +216,29 @@ class PaywallViewController: UIViewController {
         setupSubheadline()
     }
 
+    private var hasPositionedCarousel = false
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+
+        // Position once, as soon as the collection view has valid bounds — before first render
+        guard !hasPositionedCarousel, carouselCollectionView.bounds.width > 0 else { return }
+        hasPositionedCarousel = true
+
+        let cardWidth: CGFloat = 280
+        let spacing: CGFloat = 16
+        let stride = cardWidth + spacing
+        let inset = (carouselCollectionView.bounds.width - cardWidth) / 2
+
+        let midPage = (repeatCount / 2) * features.count
+        let midX = CGFloat(midPage) * stride - inset
+        carouselCollectionView.setContentOffset(CGPoint(x: midX, y: 0), animated: false)
+        currentPage = midPage
+        pageControl.currentPage = midPage % features.count
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        
-        // Force layout refresh first
-        carouselCollectionView.collectionViewLayout.invalidateLayout()
-        
-        let midOffset = (repeatCount / 2) * features.count
-        carouselCollectionView.scrollToItem(
-            at: IndexPath(item: midOffset, section: 0),
-            at: .centeredHorizontally,
-            animated: false
-        )
-        currentPage = midOffset
         startAutoScroll()
     }
     
@@ -345,11 +361,13 @@ class PaywallViewController: UIViewController {
         let next = currentPage + 1
         guard next < totalItems else { return }
         currentPage = next
-        carouselCollectionView.scrollToItem(
-            at: IndexPath(item: currentPage, section: 0),
-            at: .centeredHorizontally,
-            animated: true
-        )
+
+        let cardWidth: CGFloat = 280
+        let spacing: CGFloat = 16
+        let stride = cardWidth + spacing
+        let inset = (carouselCollectionView.bounds.width - cardWidth) / 2
+        let targetX = CGFloat(currentPage) * stride - inset
+        carouselCollectionView.setContentOffset(CGPoint(x: targetX, y: 0), animated: true)
         pageControl.currentPage = currentPage % features.count
     }
 
@@ -359,7 +377,7 @@ class PaywallViewController: UIViewController {
         if let product = PurchaseManager.shared.product {
             purchaseButton.setTitle("Unlock Loopr – \(product.displayPrice)", for: .normal)
         } else {
-            purchaseButton.setTitle("Unlock Loopr – $1.99", for: .normal)
+            purchaseButton.setTitle("Unlock Loopr – $4.99", for: .normal)
         }
         purchaseButton.isEnabled = true
     }
@@ -469,6 +487,20 @@ extension PaywallViewController: UICollectionViewDelegateFlowLayout {
         let cardWidth: CGFloat = 280
         let inset = (carouselCollectionView.bounds.width - cardWidth) / 2
         return UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView === carouselCollectionView else { return }
+        let cardWidth: CGFloat = 280
+        let spacing: CGFloat = 16
+        let stride = cardWidth + spacing
+        let inset = (carouselCollectionView.bounds.width - cardWidth) / 2
+        let centeredOffset = scrollView.contentOffset.x + inset + cardWidth / 2
+        let page = Int((centeredOffset / stride).rounded())
+        let clamped = max(0, min(page, totalItems - 1))
+        if clamped != currentPage {
+            currentPage = clamped
+        }
     }
 
     func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
