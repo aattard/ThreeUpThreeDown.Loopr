@@ -24,17 +24,21 @@ final class SplitVideoView: UIViewController {
 
     private var leftTimeObserver: Any?
     private var rightTimeObserver: Any?
+    private var linkedBoundaryObserver: Any?  // fires precisely at end of linked window
 
     private var isLinked: Bool = false
     private var isEditMode: Bool = false
     private var controlsVisible: Bool = true
     private var isSharedPlaying: Bool = false
     private var syncOffsetSeconds: Double = 0.0
-    private var linkStartLeft: Double = 0.0   // left position when link was established
+    private var linkStartLeft:  Double = 0.0  // left position when link was established
     private var linkStartRight: Double = 0.0  // right position when link was established
-    // Shared-scrub range: the window where BOTH videos have valid frames
-    private var linkedLeftMin: Double = 0.0
-    private var linkedLeftMax: Double = 0.0
+    // Overlap window expressed as seconds relative to the sync point (linkStart*)
+    // Negative = how far back both videos can go; Positive = how far forward
+    private var linkedWindowBack:    Double = 0.0  // seconds before sync point (≥0)
+    private var linkedWindowForward: Double = 0.0  // seconds after  sync point (≥0)
+    // Total window duration = linkedWindowBack + linkedWindowForward
+    private var linkedWindowDuration: Double { linkedWindowBack + linkedWindowForward }
 
     // MARK: - UI
 
@@ -454,33 +458,17 @@ final class SplitVideoView: UIViewController {
             DispatchQueue.main.async {
                 if self.isLinked {
                     if isLeft {
-                        // Update slider within the valid window
-                        if !self.sharedScrubSlider.isTracking {
-                            let window = self.linkedLeftMax - self.linkedLeftMin
-                            if window > 0 {
-                                let sliderVal = Float((current - self.linkedLeftMin) / window)
-                                self.sharedScrubSlider.value = max(0, min(1, sliderVal))
-                            }
-                        }
-                        self.sharedTimeLabel.text = self.formatTime(current)
+                        // Convert absolute left-video time to relative (seconds from sync point)
+                        let relSecs = current - self.linkStartLeft
 
-                        // Freeze the right player if it would be out of its valid range
-                        if let rightP = self.rightPlayer {
-                            let rightTarget = current + self.syncOffsetSeconds
-                            let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid)
-                                ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
-                            if rightTarget < 0 || rightTarget > rightDur {
-                                rightP.pause()
-                            }
+                        // Update slider
+                        if !self.sharedScrubSlider.isTracking && self.linkedWindowDuration > 0 {
+                            let sliderVal = Float((relSecs + self.linkedWindowBack) / self.linkedWindowDuration)
+                            self.sharedScrubSlider.value = max(0, min(1, sliderVal))
                         }
+                        self.sharedTimeLabel.text = self.formatRelativeTime(relSecs)
 
-                        // Stop at end of valid window
-                        if current >= self.linkedLeftMax - 0.05 && self.isSharedPlaying {
-                            self.leftPlayer?.pause()
-                            self.rightPlayer?.pause()
-                            self.isSharedPlaying = false
-                            self.updateSharedPlayPauseIcon()
-                        }
+
                     }
                 } else {
                     if isLeft {
@@ -509,7 +497,51 @@ final class SplitVideoView: UIViewController {
         return String(format: "%02d:%02d.%02d", m, s, hundredths)
     }
 
+    /// Shows time relative to the sync point: "-0:01.50" before, "+0:01.50" after, "0:00.00" at sync
+    private func formatRelativeTime(_ secs: Double) -> String {
+        guard secs.isFinite else { return "0:00.00" }
+        let sign = secs < -0.005 ? "-" : (secs > 0.005 ? "+" : " ")
+        let abs = Swift.abs(secs)
+        let totalSeconds = Int(abs)
+        let m = totalSeconds / 60
+        let s = totalSeconds % 60
+        let hundredths = Int(abs.truncatingRemainder(dividingBy: 1.0) * 100)
+        return String(format: "%@%d:%02d.%02d", sign, m, s, hundredths)
+    }
+
+    private func installBoundaryObserver() {
+        removeBoundaryObserver()
+        guard let leftP = leftPlayer, linkedWindowForward > 0 else { return }
+        let endTime = linkStartLeft + linkedWindowForward
+        let boundary = CMTime(seconds: endTime, preferredTimescale: 600)
+        linkedBoundaryObserver = leftP.addBoundaryTimeObserver(
+            forTimes: [NSValue(time: boundary)],
+            queue: .main
+        ) { [weak self] in
+            guard let self, self.isSharedPlaying else { return }
+            // Seek both to exact end frame then pause
+            let leftEnd  = CMTime(seconds: self.linkStartLeft  + self.linkedWindowForward, preferredTimescale: 600)
+            let rightEnd = CMTime(seconds: self.linkStartRight + self.linkedWindowForward, preferredTimescale: 600)
+            self.leftPlayer?.seek(to: leftEnd,  toleranceBefore: .zero, toleranceAfter: .zero)
+            self.rightPlayer?.seek(to: rightEnd, toleranceBefore: .zero, toleranceAfter: .zero)
+            self.leftPlayer?.pause()
+            self.rightPlayer?.pause()
+            self.isSharedPlaying = false
+            self.sharedScrubSlider.value = 1.0
+            self.sharedTimeLabel.text = self.formatRelativeTime(self.linkedWindowForward)
+            self.updateSharedPlayPauseIcon()
+        }
+    }
+
+    private func removeBoundaryObserver() {
+        if let obs = linkedBoundaryObserver {
+            leftPlayer?.removeTimeObserver(obs)
+            linkedBoundaryObserver = nil
+        }
+    }
+
     private func tearDownPlayers() {
+        removeBoundaryObserver()
         if let obs = leftTimeObserver {
             leftPlayer?.removeTimeObserver(obs)
         }
@@ -615,17 +647,22 @@ final class SplitVideoView: UIViewController {
             linkStartLeft  = leftT
             linkStartRight = rightT
 
-            // Determine the valid scrub window: the span where both videos have frames
+            // Determine the valid scrub window around the sync point
             let leftDur  = CMTIME_IS_NUMERIC(leftP.currentItem?.duration ?? .invalid)
                 ? CMTimeGetSeconds(leftP.currentItem!.duration) : 0
             let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid)
                 ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
 
-            // In left-video time: right video is valid from (0 - offset) to (rightDur - offset)
-            linkedLeftMin = max(0, -syncOffsetSeconds)
-            linkedLeftMax = min(leftDur, rightDur - syncOffsetSeconds)
-            // Clamp start to valid window
-            if linkedLeftMax <= linkedLeftMin { linkedLeftMax = leftDur }
+            // How far back from the sync point do BOTH videos have content?
+            linkedWindowBack    = min(leftT, rightT)
+            // How far forward from the sync point do BOTH videos have content?
+            linkedWindowForward = min(leftDur - leftT, rightDur - rightT)
+            // Safety: ensure at least a minimal window
+            if linkedWindowForward <= 0 { linkedWindowForward = 0 }
+            if linkedWindowBack    <= 0 { linkedWindowBack    = 0 }
+
+            // Install precise end-of-window boundary observer on left player
+            installBoundaryObserver()
 
             // Pause both
             leftP.pause()
@@ -640,14 +677,16 @@ final class SplitVideoView: UIViewController {
             rightContainer.controlsContainer.isHidden = true
             sharedControlsContainer.isHidden = false
 
-            // Set slider to current left position within the valid window
-            let window = linkedLeftMax - linkedLeftMin
-            let sliderVal = window > 0 ? Float((leftT - linkedLeftMin) / window) : 0
+            // Slider starts at the sync point: back/(back+forward) along the window
+            let sliderVal = linkedWindowDuration > 0
+                ? Float(linkedWindowBack / linkedWindowDuration) : 0
             sharedScrubSlider.value = sliderVal.isNaN ? 0 : sliderVal
-            sharedTimeLabel.text = formatTime(leftT)
+            // Time label shows elapsed time relative to sync point (0.00 = the linked frame)
+            sharedTimeLabel.text = "0:00.00"  // at sync point
 
         } else {
             // Unlinked state
+            removeBoundaryObserver()
             linkButton.setImage(UIImage(systemName: "link.circle", withConfiguration: cfg), for: .normal)
             linkButton.setTitle(" Link", for: .normal)
             linkButton.tintColor = .white
@@ -682,6 +721,7 @@ final class SplitVideoView: UIViewController {
         // If linked, cleanly unlink before tearing down the player
         if isLinked {
             isLinked = false
+            removeBoundaryObserver()
             let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
             linkButton.setImage(UIImage(systemName: "link.circle", withConfiguration: cfg), for: .normal)
             linkButton.setTitle(" Link", for: .normal)
@@ -751,10 +791,11 @@ final class SplitVideoView: UIViewController {
         } else {
             // Check if we are at or past the end of the valid window
             let currentLeft = CMTimeGetSeconds(leftP.currentTime())
-            let atEnd = currentLeft >= linkedLeftMax - 0.1
+            let forwardEnd = linkStartLeft + linkedWindowForward
+            let atEnd = currentLeft >= forwardEnd - 0.1
 
             if atEnd {
-                // Restart from the original linked start positions
+                // Restart from the original linked start positions (the coach's sync frame)
                 let timeL = CMTime(seconds: linkStartLeft,  preferredTimescale: 600)
                 let timeR = CMTime(seconds: linkStartRight, preferredTimescale: 600)
                 leftP.seek(to: timeL, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -783,24 +824,31 @@ final class SplitVideoView: UIViewController {
 
     @objc private func sharedSliderChanged(_ sender: UISlider) {
         guard let leftP = leftPlayer, let rightP = rightPlayer else { return }
+        guard linkedWindowDuration > 0 else { return }
 
-        // Map slider 0→1 over the valid window
-        let window = linkedLeftMax - linkedLeftMin
-        guard window > 0 else { return }
-        let targetLeft  = linkedLeftMin + Double(sender.value) * window
-        let targetRight = targetLeft + syncOffsetSeconds
+        // Slider 0→1 maps across the full window (back portion then forward portion)
+        // 0.0 = furthest back both videos share; 1.0 = furthest forward both videos share
+        let relativeSeconds = Double(sender.value) * linkedWindowDuration - linkedWindowBack
+        // relativeSeconds < 0 = before sync point, > 0 = after sync point
 
-        // Clamp right to its valid range so it freezes at boundary instead of seeking out-of-bounds
+        let targetLeft  = linkStartLeft  + relativeSeconds
+        let targetRight = linkStartRight + relativeSeconds
+
+        // Clamp to each video's actual duration (shouldn't be needed but defensive)
+        let leftDur  = CMTIME_IS_NUMERIC(leftP.currentItem?.duration  ?? .invalid)
+            ? CMTimeGetSeconds(leftP.currentItem!.duration)  : 0
         let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid)
             ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
-        let clampedRight = max(0, min(targetRight, rightDur))
+        let safeLeft  = max(0, min(targetLeft,  leftDur))
+        let safeRight = max(0, min(targetRight, rightDur))
 
-        sharedTimeLabel.text = formatTime(targetLeft)
+        // Label shows time relative to sync point (negative = before, positive = after)
+        sharedTimeLabel.text = formatRelativeTime(relativeSeconds)
 
-        leftP.seek(to: CMTime(seconds: targetLeft,  preferredTimescale: 600),
+        leftP.seek(to:  CMTime(seconds: safeLeft,  preferredTimescale: 600),
                    toleranceBefore: .zero, toleranceAfter: .zero)
-        rightP.seek(to: CMTime(seconds: clampedRight, preferredTimescale: 600),
-                   toleranceBefore: .zero, toleranceAfter: .zero)
+        rightP.seek(to: CMTime(seconds: safeRight, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
     }
 }
 
@@ -939,6 +987,11 @@ private final class VideoPaneView: UIView {
     private var isPlaying = false
     var isInEditMode = false
 
+    // Zoom / pan state
+    private let zoomContainer = UIView()  // receives transform; playerView lives inside
+    private var currentScale: CGFloat = 1.0
+    private var currentTranslation: CGPoint = .zero
+
     init() {
         super.init(frame: .zero)
         setup()
@@ -950,6 +1003,7 @@ private final class VideoPaneView: UIView {
 
     private func setup() {
         backgroundColor = .black
+        clipsToBounds = true  // prevent zoomed video from bleeding into the other pane
 
         playerView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1032,7 +1086,11 @@ private final class VideoPaneView: UIView {
         timeLabel.textAlignment = .right
         timeLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(playerView)
+        // zoomContainer clips to its bounds so zoomed video stays within pane
+        zoomContainer.clipsToBounds = true
+        zoomContainer.translatesAutoresizingMaskIntoConstraints = false
+        zoomContainer.addSubview(playerView)
+        addSubview(zoomContainer)
         addSubview(addButton)
         addSubview(removeButton)
         addSubview(loadingSpinner)
@@ -1043,13 +1101,19 @@ private final class VideoPaneView: UIView {
         controlsContainer.addSubview(timeLabel)
 
         NSLayoutConstraint.activate([
-            // Player spans the top without the title label pushing it down
-            playerView.topAnchor.constraint(equalTo: topAnchor),
-            playerView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            playerView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            
+            // zoomContainer fills the player area
+            zoomContainer.topAnchor.constraint(equalTo: topAnchor),
+            zoomContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            zoomContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            // playerView fills zoomContainer — transform is applied to zoomContainer
+            playerView.topAnchor.constraint(equalTo: zoomContainer.topAnchor),
+            playerView.leadingAnchor.constraint(equalTo: zoomContainer.leadingAnchor),
+            playerView.trailingAnchor.constraint(equalTo: zoomContainer.trailingAnchor),
+            playerView.bottomAnchor.constraint(equalTo: zoomContainer.bottomAnchor),
+
             // Give player the most space, keep controls at the bottom
-            controlsContainer.topAnchor.constraint(equalTo: playerView.bottomAnchor, constant: 8),
+            controlsContainer.topAnchor.constraint(equalTo: zoomContainer.bottomAnchor, constant: 8),
             controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             controlsContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
@@ -1082,6 +1146,71 @@ private final class VideoPaneView: UIView {
             scrubSlider.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -10),
             scrubSlider.centerYAnchor.constraint(equalTo: controlsContainer.centerYAnchor)
         ])
+    }
+
+    func setupZoomGestures() {
+        // Only install once — remove any existing gesture recognizers first
+        zoomContainer.gestureRecognizers?.forEach { zoomContainer.removeGestureRecognizer($0) }
+
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        let pan   = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(resetZoom))
+        doubleTap.numberOfTapsRequired = 2
+
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 2
+        pinch.delegate = self
+        pan.delegate   = self
+
+        zoomContainer.addGestureRecognizer(pinch)
+        zoomContainer.addGestureRecognizer(pan)
+        zoomContainer.addGestureRecognizer(doubleTap)
+        zoomContainer.isUserInteractionEnabled = true
+    }
+
+    @objc func resetZoom() {
+        currentScale = 1.0
+        currentTranslation = .zero
+        UIView.animate(withDuration: 0.3) {
+            self.zoomContainer.transform = .identity
+        }
+    }
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .changed, .ended:
+            let newScale = max(1.0, min(currentScale * gesture.scale, 6.0))
+            currentScale = newScale
+            gesture.scale = 1.0
+            applyTransform()
+        default:
+            break
+        }
+    }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        guard currentScale > 1.0 else { return }  // no drag when not zoomed
+        let delta = gesture.translation(in: self)
+        currentTranslation.x += delta.x
+        currentTranslation.y += delta.y
+        gesture.setTranslation(.zero, in: self)
+        clampTranslation()
+        applyTransform()
+    }
+
+    private func applyTransform() {
+        zoomContainer.transform = CGAffineTransform(scaleX: currentScale, y: currentScale)
+            .translatedBy(x: currentTranslation.x / currentScale,
+                          y: currentTranslation.y / currentScale)
+    }
+
+    private func clampTranslation() {
+        let w = bounds.width
+        let h = bounds.height
+        let maxX = (w * (currentScale - 1)) / 2
+        let maxY = (h * (currentScale - 1)) / 2
+        currentTranslation.x = max(-maxX, min(currentTranslation.x, maxX))
+        currentTranslation.y = max(-maxY, min(currentTranslation.y, maxY))
     }
 
     @objc private func togglePlayPause() {
@@ -1136,6 +1265,7 @@ private final class VideoPaneView: UIView {
     func clearPlayer() {
         playerView.player = nil
         resetPlayState()
+        resetZoom()
     }
 
     func resetPlayState() {
@@ -1156,6 +1286,7 @@ private final class VideoPaneView: UIView {
         removeButton.isHidden = true
         controlsContainer.isHidden = false
         playerView.isHidden = false
+        setupZoomGestures()
     }
 
     func showAddButton() {
@@ -1217,6 +1348,13 @@ private final class VideoPaneView: UIView {
         let fraction = secs.truncatingRemainder(dividingBy: 1.0)
         let hundredths = Int(fraction * 100)
         return String(format: "%02d:%02d.%02d", m, s, hundredths)
+    }
+}
+
+extension VideoPaneView: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gr: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        return true  // allow pinch + pan at the same time
     }
 }
 
