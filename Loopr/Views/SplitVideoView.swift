@@ -446,9 +446,13 @@ final class SplitVideoView: UIViewController {
         player.currentItem?.asset.loadValuesAsynchronously(forKeys: ["duration"]) { [weak self, weak player, weak container] in
             guard let self, let player, let container else { return }
             DispatchQueue.main.async {
-                guard let item = player.currentItem,
-                      let dur = item.duration as CMTime?,
-                      CMTIME_IS_NUMERIC(dur) else { return }
+                guard let item = player.currentItem else { return }
+                
+                // ✅ FIX: Grab the duration from the ASSET, which we just finished loading.
+                let dur = item.asset.duration
+                
+                guard CMTIME_IS_NUMERIC(dur) else { return }
+                
                 let fps = 30.0  // display fps for frame stepping
                 let total = max(1, Int(CMTimeGetSeconds(dur) * fps))
                 container.frameDial.totalFrames = total
