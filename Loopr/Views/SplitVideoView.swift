@@ -307,9 +307,18 @@ final class SplitVideoView: UIViewController {
         sharedScrubSlider.addTarget(self, action: #selector(sharedSliderChanged(_:)), for: .valueChanged)
 
         sharedFrameDial.onDragBegan = { [weak self] in
-            guard let self = self, let leftP = self.leftPlayer else { return }
+            guard let self else { return }
+            // ✅ Pause if linked players are playing
+            if self.isSharedPlaying {
+                self.leftPlayer?.pause()
+                self.rightPlayer?.pause()
+                self.isSharedPlaying = false
+                self.updateSharedPlayPauseIcon()
+            }
+            guard let leftP = self.leftPlayer else { return }
             self.sharedTrackedLeftSeconds = CMTimeGetSeconds(leftP.currentTime())
         }
+        
         sharedFrameDial.onFrameStep = { [weak self] delta in
             self?.stepLinkedFrame(delta: delta)
         }
@@ -352,6 +361,7 @@ final class SplitVideoView: UIViewController {
             let player = AVPlayer(url: url)
             leftPlayer = player
             leftContainer.playerView.player = player
+            leftContainer.attachEndObserver()
             addTimeObserver(for: player, isLeft: true)
             setupDial(for: leftContainer, player: player)
         } else {
@@ -371,6 +381,7 @@ final class SplitVideoView: UIViewController {
             let player = AVPlayer(url: url)
             rightPlayer = player
             rightContainer.playerView.player = player
+            rightContainer.attachEndObserver()
             addTimeObserver(for: player, isLeft: false)
             setupDial(for: rightContainer, player: player)
         } else {
@@ -395,6 +406,11 @@ final class SplitVideoView: UIViewController {
                 var trackedSeconds = CMTimeGetSeconds(player.currentTime())
 
                 container.frameDial.onDragBegan = { [weak self, weak player] in
+                    // ✅ Pause if playing when dial drag starts
+                    if container.isPlaying {
+                        container.pausePlayback()
+                    }
+                    
                     let current = CMTimeGetSeconds(player?.currentTime() ?? .zero)
                     trackedSeconds = current
                     self?.sharedTrackedLeftSeconds = current
@@ -519,22 +535,55 @@ final class SplitVideoView: UIViewController {
     }
 
     @objc private func sharedSliderChanged(_ sender: UISlider) {
+        // ✅ Pause if linked players are playing
+        if isSharedPlaying {
+            leftPlayer?.pause()
+            rightPlayer?.pause()
+            isSharedPlaying = false
+            updateSharedPlayPauseIcon()
+        }
         guard let leftP = leftPlayer, let rightP = rightPlayer, linkedWindowDuration > 0 else { return }
         let relSecs = Double(sender.value) * linkedWindowDuration - linkedWindowBack
         let safeLeft = linkStartLeft + relSecs
         let safeRight = linkStartRight + relSecs
-
         sharedTimeLabel.text = formatRelativeTime(relSecs)
         sharedFrameDial.currentFrame = Int((relSecs + linkedWindowBack) * 30.0)
-        
         leftP.seek(to: CMTime(seconds: safeLeft, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         rightP.seek(to: CMTime(seconds: safeRight, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     @objc private func sharedPlayPauseTapped() {
         guard let lp = leftPlayer, let rp = rightPlayer else { return }
-        if isSharedPlaying { lp.pause(); rp.pause() } else { lp.play(); rp.play() }
-        isSharedPlaying.toggle(); updateSharedPlayPauseIcon()
+
+        if isSharedPlaying {
+            lp.pause()
+            rp.pause()
+            isSharedPlaying = false
+            updateSharedPlayPauseIcon()
+        } else {
+            // Check if left player is at or near the end of the linked window
+            let currentLeft = CMTimeGetSeconds(lp.currentTime())
+            let windowEnd = linkStartLeft + linkedWindowForward
+            let nearEnd = currentLeft >= windowEnd - 0.1
+
+            if nearEnd {
+                // Seek both players back to their link start positions
+                let leftStart = CMTime(seconds: linkStartLeft, preferredTimescale: 600)
+                let rightStart = CMTime(seconds: linkStartRight, preferredTimescale: 600)
+                lp.seek(to: leftStart, toleranceBefore: .zero, toleranceAfter: .zero)
+                rp.seek(to: rightStart, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak lp, weak rp] _ in
+                    lp?.play()
+                    rp?.play()
+                    self?.isSharedPlaying = true
+                    self?.updateSharedPlayPauseIcon()
+                }
+            } else {
+                lp.play()
+                rp.play()
+                isSharedPlaying = true
+                updateSharedPlayPauseIcon()
+            }
+        }
     }
 
     private func updateSharedPlayPauseIcon() {
@@ -591,6 +640,11 @@ final class SplitVideoView: UIViewController {
     }
 
     @objc private func leftSliderChanged(_ sender: UISlider) {
+        // ✅ Pause if playing
+        if leftContainer.isPlaying {
+            leftContainer.pausePlayback()
+        }
+        
         guard let p = leftPlayer, let dur = p.currentItem?.duration, CMTIME_IS_NUMERIC(dur) else { return }
         let target = Double(sender.value) * CMTimeGetSeconds(dur)
         leftContainer.updateSlider(value: sender.value, currentTime: target, totalTime: 0)
@@ -598,6 +652,11 @@ final class SplitVideoView: UIViewController {
     }
 
     @objc private func rightSliderChanged(_ sender: UISlider) {
+        // ✅ Pause if playing
+        if rightContainer.isPlaying {
+            rightContainer.pausePlayback()
+        }
+        
         guard let p = rightPlayer, let dur = p.currentItem?.duration, CMTIME_IS_NUMERIC(dur) else { return }
         let target = Double(sender.value) * CMTimeGetSeconds(dur)
         rightContainer.updateSlider(value: sender.value, currentTime: target, totalTime: 0)
@@ -712,6 +771,7 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
             leftContainer.showVideo()
             leftContainer.resetPlayState()
             leftContainer.playerView.player = player
+            leftContainer.attachEndObserver()
             addTimeObserver(for: player, isLeft: true)
             setupDial(for: leftContainer, player: player)
         } else { // Right Side
@@ -722,6 +782,7 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
             rightContainer.showVideo()
             rightContainer.resetPlayState()
             rightContainer.playerView.player = player
+            rightContainer.attachEndObserver()
             addTimeObserver(for: player, isLeft: false)
             setupDial(for: rightContainer, player: player)
         }
@@ -748,6 +809,8 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
 
 // MARK: - VideoPaneView
 private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
+    private var itemDidEndObserver: NSObjectProtocol?
+
     let playerView = PlayerContainerView()
     let addButton = UIButton(type: .system)
     let removeButton = UIButton(type: .system)
@@ -784,7 +847,7 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
     let timeLabel = UILabel()
     let loadingSpinner = UIActivityIndicatorView(style: .large)
     let frameDial = FrameDial()
-    private var isPlaying = false
+    private(set) var isPlaying = false
     var isInEditMode = false
     private let zoomContainer = UIView()
 
@@ -838,6 +901,12 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
             frameDial.centerXAnchor.constraint(equalTo: scrubSlider.centerXAnchor), frameDial.widthAnchor.constraint(equalTo: scrubSlider.widthAnchor, multiplier: 0.75), frameDial.topAnchor.constraint(equalTo: playPauseButton.bottomAnchor, constant: 4), frameDial.heightAnchor.constraint(equalToConstant: 28)
         ])
     }
+    
+    func pausePlayback() {
+        playerView.player?.pause()
+        isPlaying = false
+        updatePlayPauseIcon()
+    }
 
     private func setupGestures() {
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
@@ -850,9 +919,32 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
     }
 
     @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
-        if gesture.state == .began { lastScale = currentScale }
-        currentScale = max(1.0, lastScale * gesture.scale)
-        updateTransform()
+        switch gesture.state {
+        case .began:
+            lastScale = currentScale
+
+        case .changed:
+            currentScale = max(0.5, lastScale * gesture.scale)
+            updateTransform()
+
+        case .ended, .cancelled, .failed:
+            if currentScale < 1.0 {
+                currentScale = 1.0
+                currentOffset = .zero
+                lastScale = 1.0
+                lastOffset = .zero
+                UIView.animate(withDuration: 0.35,
+                               delay: 0,
+                               usingSpringWithDamping: 0.7,
+                               initialSpringVelocity: 0.5,
+                               options: .curveEaseOut) {
+                    self.playerView.transform = .identity
+                }
+            }
+
+        default:
+            break
+        }
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -889,26 +981,84 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
 
     @objc private func togglePlayPause() {
         guard let p = playerView.player else { return }
-        p.rate > 0 ? p.pause() : p.play(); isPlaying = (p.rate > 0); updatePlayPauseIcon()
+
+        if isPlaying {
+            p.pause()
+            isPlaying = false
+            updatePlayPauseIcon()
+        } else {
+            // If at (or very near) the end, seek to start first
+            let duration = p.currentItem?.duration ?? .zero
+            let current = p.currentTime()
+            let nearEnd = CMTIME_IS_NUMERIC(duration) &&
+                          CMTimeGetSeconds(current) >= CMTimeGetSeconds(duration) - 0.1
+
+            if nearEnd {
+                p.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak p] _ in
+                    p?.play()
+                    self?.isPlaying = true
+                    self?.updatePlayPauseIcon()
+                }
+            } else {
+                p.play()
+                isPlaying = true
+                updatePlayPauseIcon()
+            }
+        }
     }
+
     func updatePlayPauseIcon() {
         let name = isPlaying ? "pause.circle.fill" : "play.circle.fill"
         let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
         playPauseButton.setImage(UIImage(systemName: name, withConfiguration: cfg), for: .normal)
     }
+    
     func showVideo() { addButton.isHidden = true; removeButton.isHidden = true; controlsContainer.isHidden = false }
+    
     func showAddButton() { addButton.isHidden = false; removeButton.isHidden = true; controlsContainer.isHidden = true }
+    
     func showLoading() { addButton.isHidden = true; loadingSpinner.startAnimating(); loadingSpinner.isHidden = false }
+    
     func hideLoading() { loadingSpinner.stopAnimating(); loadingSpinner.isHidden = true; if playerView.player == nil { showAddButton() } }
     func toggleEditMode() { isInEditMode.toggle(); isInEditMode ? showRemoveButton() : (playerView.player != nil ? showVideo() : showAddButton()) }
     func showRemoveButton() { addButton.isHidden = true; removeButton.isHidden = false; controlsContainer.isHidden = true }
-    func clearPlayer() { playerView.player = nil; isPlaying = false; updatePlayPauseIcon() }
+    
+    func clearPlayer() {
+        if let obs = itemDidEndObserver {
+            NotificationCenter.default.removeObserver(obs)
+            itemDidEndObserver = nil
+        }
+        playerView.player = nil
+        isPlaying = false
+        updatePlayPauseIcon()
+    }
+    
     func resetPlayState() { isPlaying = false; updatePlayPauseIcon(); scrubSlider.value = 0; timeLabel.text = "00:00.00" }
+    
     @objc private func removeVideoTapped() { NotificationCenter.default.post(name: Notification.Name("VideoPaneViewRemoveTapped"), object: nil, userInfo: ["container": self]) }
+    
     func updateSlider(value: Float, currentTime: Double, totalTime: Double) { timeLabel.text = formatTime(currentTime); if !scrubSlider.isTracking { scrubSlider.value = value } }
+    
     private func formatTime(_ secs: Double) -> String {
         let m = Int(secs) / 60, s = Int(secs) % 60, h = Int(secs.truncatingRemainder(dividingBy: 1.0) * 100)
         return String(format: "%02d:%02d.%02d", m, s, h)
+    }
+    
+    func attachEndObserver() {
+        // Remove any existing observer first
+        if let obs = itemDidEndObserver {
+            NotificationCenter.default.removeObserver(obs)
+            itemDidEndObserver = nil
+        }
+        guard let item = playerView.player?.currentItem else { return }
+        itemDidEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            self?.isPlaying = false
+            self?.updatePlayPauseIcon()
+        }
     }
 }
 

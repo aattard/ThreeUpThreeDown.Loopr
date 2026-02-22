@@ -122,6 +122,11 @@ final class FrameDial: UIView {
         ctx.strokePath()
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        setNeedsDisplay()
+    }
+
     // MARK: - Pan handler
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
         switch gesture.state {

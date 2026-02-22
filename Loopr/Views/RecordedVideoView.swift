@@ -54,8 +54,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Zoom / pan
     private let zoomContainer = UIView()
-    private var currentZoomScale: CGFloat = 1.0
-    private var currentZoomTranslation: CGPoint = .zero
+    private var currentScale: CGFloat = 1.0
+    private var lastScale: CGFloat = 1.0
+    private var currentOffset: CGPoint = .zero
+    private var lastOffset: CGPoint = .zero
 
     // MARK: - Config
     private var scrubDurationSeconds: Int { Settings.shared.bufferDurationSeconds }
@@ -507,8 +509,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         self.recordedRotationAngle = recordedRotationAngle
 
         // Reset zoom whenever a new recording is presented
-        currentZoomScale = 1.0
-        currentZoomTranslation = .zero
+        currentScale = 1.0
+        currentOffset = .zero
+        lastScale = 1.0
+        lastOffset = .zero
         zoomContainer.transform = .identity
 
         scrubberPosition = initialScrubberIndex
@@ -542,7 +546,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         setupFrameDial()
 
         // Re-apply zoom transform after layout settles
-        DispatchQueue.main.async { self.applyZoomTransform() }
+        DispatchQueue.main.async {
+            self.updateTransform()
+        }
     }
 
     private func setupFrameDial() {
@@ -1152,7 +1158,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         isLooping = true
         let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        playPauseButton.setImage(UIImage(systemName: "pause.fill", withConfiguration: cfg), for: .normal)
+        playPauseButton.setImage(UIImage(systemName: "pause.circle.fill", withConfiguration: cfg), for: .normal)
 
         if player == nil {
             let item = AVPlayerItem(asset: comp)
@@ -1337,6 +1343,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         scrubberPlayheadConstraint?.constant = x
         scrubberTouchAreaConstraint?.constant = x - 22
         layoutIfNeeded()
+        
+        // ✅ Keep dial in sync so rightward drag is never falsely blocked
+        frameDial.currentFrame = max(0, scrubberPosition - oldest)
     }
 
     // MARK: - Oldest allowed index helper
@@ -1410,7 +1419,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         updateTimeLabel()
 
         // Re-apply zoom transform after layout settles so the video stays in place
-        DispatchQueue.main.async { self.applyZoomTransform() }
+        DispatchQueue.main.async {
+            self.updateTransform()
+        }
     }
 
     private func exitClipMode() {
@@ -1471,7 +1482,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         updatePlayheadPosition()
         updateTimeLabel()
 
-        DispatchQueue.main.async { self.applyZoomTransform() }
+        DispatchQueue.main.async {
+            self.updateTransform()
+        }
     }
 
     func resetUIAndTearDown() {
@@ -1570,6 +1583,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         playheadWidthConstraint?.constant = playheadWidth
 
         layoutIfNeeded()
+        
+        // ✅ Keep dial in sync
+        frameDial.currentFrame = max(0, clipPlayheadPosition - oldest)
     }
 
     private func updateTimeLabel() {
@@ -1876,68 +1892,68 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Zoom gestures
     private func setupZoomGestures() {
-        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handleZoomPinch(_:)))
-        let pan   = UIPanGestureRecognizer(target: self, action: #selector(handleZoomPan(_:)))
-        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(resetZoom))
-        doubleTap.numberOfTapsRequired = 2
-
-        pan.minimumNumberOfTouches = 1  // 1-finger drag when zoomed in; guard in handler prevents conflict at 1x
-        pan.maximumNumberOfTouches = 2
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         pinch.delegate = self
-        pan.delegate   = self
-
         addGestureRecognizer(pinch)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.delegate = self
         addGestureRecognizer(pan)
-        addGestureRecognizer(doubleTap)
     }
 
     @objc private func resetZoom() {
-        currentZoomScale = 1.0
-        currentZoomTranslation = .zero
+        currentScale = 1.0
+        currentOffset = .zero
+        lastScale = 1.0
+        lastOffset = .zero
         UIView.animate(withDuration: 0.3) {
             self.zoomContainer.transform = .identity
         }
     }
 
-    @objc private func handleZoomPinch(_ gesture: UIPinchGestureRecognizer) {
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
         switch gesture.state {
-        case .changed, .ended:
-            currentZoomScale = max(1.0, min(currentZoomScale * gesture.scale, 6.0))
-            gesture.scale = 1.0
-            // If we've pinched back to 1x, reset translation too so nothing is off-center
-            if currentZoomScale == 1.0 {
-                currentZoomTranslation = .zero
+        case .began:
+            lastScale = currentScale
+
+        case .changed:
+            // Allow shrinking below 1.0 for the "bounce" feel — no max(1.0) clamp here
+            currentScale = max(0.5, lastScale * gesture.scale)
+            updateTransform()
+
+        case .ended, .cancelled, .failed:
+            if currentScale < 1.0 {
+                // Snap back to full size with a spring animation
+                currentScale = 1.0
+                currentOffset = .zero
+                lastScale = 1.0
+                lastOffset = .zero
+                UIView.animate(withDuration: 0.35,
+                               delay: 0,
+                               usingSpringWithDamping: 0.7,
+                               initialSpringVelocity: 0.5,
+                               options: .curveEaseOut) {
+                    self.zoomContainer.transform = .identity
+                }
             }
-            applyZoomTransform()
+
         default:
             break
         }
     }
 
-    @objc private func handleZoomPan(_ gesture: UIPanGestureRecognizer) {
-        // Allow pan whenever scale > 1, OR while the gesture is already active
-        // (covers the moment scale snaps back to 1.0 while fingers are still moving)
-        guard currentZoomScale > 1.0 || gesture.state == .changed else { return }
-        let delta = gesture.translation(in: self)
-        currentZoomTranslation.x += delta.x
-        currentZoomTranslation.y += delta.y
-        gesture.setTranslation(.zero, in: self)
-        clampZoomTranslation()
-        applyZoomTransform()
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        if gesture.state == .began { lastOffset = currentOffset }
+        let translation = gesture.translation(in: self)
+        currentOffset = CGPoint(x: lastOffset.x + translation.x,
+                                y: lastOffset.y + translation.y)
+        updateTransform()
     }
 
-    private func applyZoomTransform() {
-        // translatedBy works in the post-scale coordinate space, so divide by scale
-        zoomContainer.transform = CGAffineTransform(scaleX: currentZoomScale, y: currentZoomScale)
-            .translatedBy(x: currentZoomTranslation.x / currentZoomScale,
-                          y: currentZoomTranslation.y / currentZoomScale)
-    }
-
-    private func clampZoomTranslation() {
-        let maxX = bounds.width * (currentZoomScale - 1) / 2
-        let maxY = bounds.height * (currentZoomScale - 1) / 2
-        currentZoomTranslation.x = max(-maxX, min(currentZoomTranslation.x, maxX))
-        currentZoomTranslation.y = max(-maxY, min(currentZoomTranslation.y, maxY))
+    private func updateTransform() {
+        let scaleT = CGAffineTransform(scaleX: currentScale, y: currentScale)
+        let translateT = CGAffineTransform(translationX: currentOffset.x, y: currentOffset.y)
+        zoomContainer.transform = scaleT.concatenating(translateT)
     }
 
     // MARK: - UIGestureRecognizerDelegate
