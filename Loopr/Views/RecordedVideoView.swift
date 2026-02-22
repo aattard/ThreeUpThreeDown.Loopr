@@ -939,40 +939,77 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         guard isClipMode else { return }
         if isLooping { stopLoop() }
 
+        let fps = max(Settings.shared.currentFPS(isFrontCamera: isFrontCamera), 1)
+        let frames = clipEndIndex - clipStartIndex
+        let secs = frames / fps
+        let minutes = secs / 60
+        let seconds = secs % 60
+
         switch bucket {
         case 1:
+            // Already has a clip — just clear it, no alert
             if let url = tempClipBucket1URL {
-                print("ðŸ—‘ Clearing bucket 1 temp clip at \(url.path)")
+                print("Clearing bucket 1 temp clip at \(url.path)")
                 try? FileManager.default.removeItem(at: url)
                 tempClipBucket1URL = nil
                 refreshBucketIcons()
                 updateSplitButtonState()
                 return
             }
-            // creating a new one:
-            exportCurrentSelectionToTemp { [weak self] url in
-                guard let self, let url else { return }
-                print("âœ… Bucket 1 assigned temp clip at \(url.path)")
-                self.tempClipBucket1URL = url
-                self.refreshBucketIcons()
-                self.updateSplitButtonState()
+            // Creating a new clip — show alert only if long
+            let doExport1 = { [weak self] in
+                self?.exportCurrentSelectionToTemp { [weak self] url in
+                    guard let self, let url else { return }
+                    print("Bucket 1 assigned temp clip at \(url.path)")
+                    self.tempClipBucket1URL = url
+                    self.refreshBucketIcons()
+                    self.updateSplitButtonState()
+                }
+            }
+            if secs > 60 {
+                let alert = UIAlertController(
+                    title: "Long Clip",
+                    message: "This clip is \(minutes):\(String(format: "%02d", seconds)) long. Saving to Left Side for Split Screen may take a moment.",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                alert.addAction(UIAlertAction(title: "Save", style: .default) { _ in doExport1() })
+                parentViewController?.present(alert, animated: true)
+            } else {
+                doExport1()
             }
 
         case 2:
+            // Already has a clip — just clear it, no alert
             if let url = tempClipBucket2URL {
-                print("ðŸ—‘ Clearing bucket 2 temp clip at \(url.path)")
+                print("Clearing bucket 2 temp clip at \(url.path)")
                 try? FileManager.default.removeItem(at: url)
                 tempClipBucket2URL = nil
                 refreshBucketIcons()
                 updateSplitButtonState()
                 return
             }
-            exportCurrentSelectionToTemp { [weak self] url in
-                guard let self, let url else { return }
-                print("âœ… Bucket 2 assigned temp clip at \(url.path)")
-                self.tempClipBucket2URL = url
-                self.refreshBucketIcons()
-                self.updateSplitButtonState()
+            // Creating a new clip — show alert only if long
+            let doExport2 = { [weak self] in
+                self?.exportCurrentSelectionToTemp { [weak self] url in
+                    guard let self, let url else { return }
+                    print("Bucket 2 assigned temp clip at \(url.path)")
+                    self.tempClipBucket2URL = url
+                    self.refreshBucketIcons()
+                    self.updateSplitButtonState()
+                }
+            }
+            if secs > 60 {
+                let alert = UIAlertController(
+                    title: "Long Clip",
+                    message: "This clip is \(minutes):\(String(format: "%02d", seconds)) long. Saving to Right Side for Split Screen may take a moment.",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                alert.addAction(UIAlertAction(title: "Save", style: .default) { _ in doExport2() })
+                parentViewController?.present(alert, animated: true)
+            } else {
+                doExport2()
             }
 
         default:
@@ -985,7 +1022,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         let fps = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
 
-        let overlay = createLoadingView(text: "Creating clip...")
+        let overlay = createLoadingView(text: "Creating Clip...")
         addSubview(overlay)
         overlay.frame = bounds
 
