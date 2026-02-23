@@ -38,6 +38,11 @@ class InfoViewController: UIViewController {
             detail: "TAP the screen to reveal controls, then TAP PAUSE to freeze the replay. Drag the scrub bar to move through the swing frame by frame."
         ),
         HowToCard(
+            icon: "dial.medium",
+            action: "Frame Dial",
+            detail: "While paused, drag the dial at the bottom of the screen left or right to step through the replay one frame at a time — every tick is exactly one frame."
+        ),
+        HowToCard(
             icon: "scissors",
             action: "Clip & Save",
             detail: "While paused, TAP the scissors icon to enter Clip mode. Trim the handles to your best moment, then save it directly to your Photos library."

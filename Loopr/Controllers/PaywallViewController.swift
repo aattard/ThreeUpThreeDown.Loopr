@@ -27,8 +27,14 @@ class PaywallViewController: UIViewController {
         ),
         FeatureCard(
             icon: "slider.horizontal.below.rectangle",
-            title: "Frame-by-Frame Scrub",
+            title: "Pause & Scrub",
             description: "Pause and drag through the replay one frame at a time. Spot the exact moment contact breaks down.",
+            color: purple
+        ),
+        FeatureCard(
+            icon: "dial.medium",
+            title: "Frame Dial",
+            description: "Drag the precision dial left or right while paused to step one frame at a time. Haptic feedback on every tick — feel exactly where the swing breaks down.",
             color: purple
         ),
         FeatureCard(
