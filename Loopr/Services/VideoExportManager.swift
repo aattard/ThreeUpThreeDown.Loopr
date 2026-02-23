@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Photos
+import UIKit
 
 enum VideoExportError: LocalizedError {
     case missingBuffer
@@ -127,6 +128,11 @@ final class VideoExportManager {
             instruction.layerInstructions = [layerInstruction]
             vc.instructions = [instruction]
 
+            // ── Watermark overlay ─────────────────────────────────────────────
+            if let animTool = makeWatermarkAnimationTool(canvasSize: vc.renderSize) {
+                vc.animationTool = animTool
+            }
+
             exporter.videoComposition = vc
         }
 
@@ -142,4 +148,43 @@ final class VideoExportManager {
         }
     }
 
+    // MARK: - Watermark
+
+    /// Burns "watermark-logo" from Assets into the bottom-right corner of every frame.
+    /// Size: ~6% of the shorter canvas dimension (~65px on 1080p). Opacity: 0.35.
+    private static func makeWatermarkAnimationTool(canvasSize: CGSize) -> AVVideoCompositionCoreAnimationTool? {
+        guard let image = UIImage(named: "watermark-logo") else {
+            print("⚠️ VideoExport: watermark-logo image not found in asset catalog")
+            return nil
+        }
+        print("✅ VideoExport: watermark-logo loaded, canvas=\(canvasSize.width)x\(canvasSize.height)")
+
+        let shortSide = min(canvasSize.width, canvasSize.height)
+        let markSize  = round(shortSide * 0.12)
+        let inset     = round(shortSide * 0.02)
+
+        let videoLayer = CALayer()
+        videoLayer.frame = CGRect(origin: .zero, size: canvasSize)
+
+        let parentLayer = CALayer()
+        parentLayer.frame = CGRect(origin: .zero, size: canvasSize)
+        parentLayer.addSublayer(videoLayer)
+
+        let markLayer = CALayer()
+        markLayer.contents        = image.cgImage
+        markLayer.contentsGravity = .resizeAspect
+        markLayer.opacity         = 0.5
+        markLayer.frame = CGRect(
+            x: canvasSize.width  - markSize - inset,
+            y: inset,
+            width:  markSize,
+            height: markSize
+        )
+        parentLayer.addSublayer(markLayer)
+
+        return AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: videoLayer,
+            in: parentLayer
+        )
+    }
 }

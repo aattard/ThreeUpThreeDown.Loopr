@@ -50,6 +50,12 @@ class PaywallViewController: UIViewController {
             color: purple
         ),
         FeatureCard(
+            icon: "arrow.down.to.line.circle",
+            title: "Save Split Video",
+            description: "Export your split-screen comparison as a single video to Photos — zoom, pan, and all. Share with athletes or parents in seconds.",
+            color: purple
+        ),
+        FeatureCard(
             icon: "camera.rotate",
             title: "Front & Back Camera",
             description: "Switch between front and back cameras. Set up behind the plate or down the third base line.",

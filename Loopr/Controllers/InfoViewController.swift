@@ -50,7 +50,12 @@ class InfoViewController: UIViewController {
         HowToCard(
             icon: "rectangle.split.2x1",
             action: "Split View",
-            detail: "TAP the split view icon to place two clips side by side. LINK them to scrub both simultaneously and compare moments in sync, or UNLINK to scrub each clip independently."
+            detail: "TAP the split view icon to place two clips side by side. LINK them to scrub both simultaneously and compare moments in sync, or UNLINK to scrub each clip independently. When linked, TAP the save icon to export the split-screen as a single video to your Photos library."
+        ),
+        HowToCard(
+            icon: "arrow.down.to.line.circle",
+            action: "Save Split Video",
+            detail: "While in Split View with both clips LINKED, TAP the save icon beneath the top-left controls. Your current zoom and pan for each pane is preserved in the export — what you see is exactly what gets saved."
         ),
         HowToCard(
             icon: "arrow.counterclockwise.circle.fill",

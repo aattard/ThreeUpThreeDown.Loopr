@@ -1418,8 +1418,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         clipEndIndex = pausePoint
         clipPlayheadPosition = scrubberPosition
 
-        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        clipSaveButton.setImage(UIImage(systemName: "arrow.down.to.line.circle.fill", withConfiguration: cfg), for: .normal)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .regular)
+        clipSaveButton.setImage(UIImage(systemName: "arrow.down.to.line.circle", withConfiguration: cfg), for: .normal)
         clipSaveButton.tintColor = .white
 
         cancelClipButton.isHidden = false
@@ -1488,8 +1488,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         // Reâ€‘enter clip mode UI with same selection, buckets untouched
         isClipMode = true
 
-        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .bold)
-        clipSaveButton.setImage(UIImage(systemName: "arrow.down.to.line.circle.fill", withConfiguration: cfg), for: .normal)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 32, weight: .regular)
+        clipSaveButton.setImage(UIImage(systemName: "arrow.down.to.line.circle", withConfiguration: cfg), for: .normal)
         clipSaveButton.tintColor = .white
 
         cancelClipButton.isHidden = false

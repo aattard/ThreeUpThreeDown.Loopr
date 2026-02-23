@@ -33,8 +33,12 @@ final class SplitVideoView: UIViewController {
     private var linkedWindowBack:    Double = 0.0
     private var linkedWindowForward: Double = 0.0
     private var linkedWindowDuration: Double { linkedWindowBack + linkedWindowForward }
-    
+
     private var sharedTrackedLeftSeconds: Double = 0.0
+
+    // MARK: - Export state
+
+    private var exportToken: SplitExportToken?
 
     // MARK: - UI Components
 
@@ -67,7 +71,7 @@ final class SplitVideoView: UIViewController {
         b.isEnabled = false
         return b
     }()
-    
+
     private let editButton: UIButton = {
         let b = UIButton(type: .system)
         let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
@@ -128,7 +132,7 @@ final class SplitVideoView: UIViewController {
         v.isHidden = true
         return v
     }()
-    
+
     private let sharedPlayPauseButton: UIButton = {
         let b = UIButton(type: .system)
         let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
@@ -137,7 +141,7 @@ final class SplitVideoView: UIViewController {
         b.translatesAutoresizingMaskIntoConstraints = false
         return b
     }()
-    
+
     private let sharedScrubSlider: UISlider = {
         let s = UISlider()
         let thumbSize: CGFloat = 20
@@ -145,12 +149,12 @@ final class SplitVideoView: UIViewController {
         let padding: CGFloat = 1.5
 
         let thumbImage = UIGraphicsImageRenderer(size: CGSize(width: thumbSize, height: thumbSize))
-            .image { context in
+            .image { _ in
                 let fillSize = thumbSize - (strokeWidth * 2) - (padding * 2)
                 let fillRect = CGRect(x: padding + strokeWidth, y: padding + strokeWidth, width: fillSize, height: fillSize)
                 UIColor.white.setFill()
                 UIBezierPath(ovalIn: fillRect).fill()
-                
+
                 let strokeRect = CGRect(x: padding, y: padding, width: thumbSize - (padding * 2), height: thumbSize - (padding * 2))
                 UIColor.systemYellow.setStroke()
                 let strokePath = UIBezierPath(ovalIn: strokeRect)
@@ -181,6 +185,86 @@ final class SplitVideoView: UIViewController {
         return dial
     }()
 
+    // MARK: - Save Video UI (visible only when linked)
+
+    private let saveVideoContainer: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        v.layer.cornerRadius = 32
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.clipsToBounds = true
+        v.isHidden = true
+        return v
+    }()
+
+    private let saveVideoButton: UIButton = {
+        let b = UIButton(type: .system)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
+        b.setImage(UIImage(systemName: "arrow.down.to.line.circle", withConfiguration: cfg), for: .normal)
+        b.setTitle("  Save", for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        b.tintColor = .white
+        b.translatesAutoresizingMaskIntoConstraints = false
+        return b
+    }()
+
+    // MARK: - Export progress overlay (spinner, matching RecordedVideoView style)
+
+    private let exportOverlay: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.isHidden = true
+
+        let spinner = UIActivityIndicatorView(style: .large)
+        spinner.color = .white
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.startAnimating()
+
+        let label = UILabel()
+        label.text = "Saving to Photos"
+        label.textColor = .white
+        label.font = .systemFont(ofSize: 20, weight: .semibold)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        v.addSubview(spinner)
+        v.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: v.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: v.centerYAnchor, constant: -20),
+            label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 12),
+            label.centerXAnchor.constraint(equalTo: v.centerXAnchor)
+        ])
+
+        return v
+    }()
+
+    // Success checkmark — matches RecordedVideoView.successFeedbackView exactly
+    private let exportSuccessView: UIView = {
+        let v = UIView()
+        v.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        v.layer.cornerRadius = 20
+        v.clipsToBounds = true
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.alpha = 0
+
+        let cfg = UIImage.SymbolConfiguration(pointSize: 120, weight: .bold)
+        let iv = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: cfg))
+        iv.tintColor = .white
+        iv.contentMode = .center
+        iv.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(iv)
+
+        NSLayoutConstraint.activate([
+            iv.centerXAnchor.constraint(equalTo: v.centerXAnchor),
+            iv.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+            iv.widthAnchor.constraint(equalToConstant: 150),
+            iv.heightAnchor.constraint(equalToConstant: 150)
+        ])
+        return v
+    }()
+
     // MARK: - Lifecycle
 
     init(leftURL: URL?, rightURL: URL?) {
@@ -199,7 +283,7 @@ final class SplitVideoView: UIViewController {
         setupActions()
         setupTapGesture()
         configurePlayers()
-        
+
         NotificationCenter.default.addObserver(self, selector: #selector(handleRemoveNotification(_:)), name: Notification.Name("VideoPaneViewRemoveTapped"), object: nil)
     }
 
@@ -221,7 +305,7 @@ final class SplitVideoView: UIViewController {
         closeButtonContainer.addSubview(closeButton)
         closeButtonContainer.addSubview(linkButton)
         closeButtonContainer.addSubview(editButton)
-        
+
         view.addSubview(topRightContainer)
         topRightContainer.addSubview(restartButton)
         topRightContainer.addSubview(stopSessionButton)
@@ -234,6 +318,17 @@ final class SplitVideoView: UIViewController {
         sharedControlsContainer.addSubview(sharedScrubSlider)
         sharedControlsContainer.addSubview(sharedTimeLabel)
         sharedControlsContainer.addSubview(sharedFrameDial)
+
+        // Save video button — sits below the top-left container
+        view.addSubview(saveVideoContainer)
+        saveVideoContainer.addSubview(saveVideoButton)
+
+        // Export overlay — fullscreen, added last so it sits on top of everything.
+        // Spinner + label are built inside the lazy closure — no extra subviews needed here.
+        view.addSubview(exportOverlay)
+
+        // Success checkmark — same layer order, hidden until needed
+        view.addSubview(exportSuccessView)
 
         NSLayoutConstraint.activate([
             stackView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
@@ -287,7 +382,28 @@ final class SplitVideoView: UIViewController {
             sharedFrameDial.centerXAnchor.constraint(equalTo: sharedScrubSlider.centerXAnchor),
             sharedFrameDial.widthAnchor.constraint(equalTo: sharedScrubSlider.widthAnchor, multiplier: 0.75),
             sharedFrameDial.topAnchor.constraint(equalTo: sharedPlayPauseButton.bottomAnchor, constant: 4),
-            sharedFrameDial.heightAnchor.constraint(equalToConstant: 28)
+            sharedFrameDial.heightAnchor.constraint(equalToConstant: 28),
+
+            // Save video button — below the top-left container
+            saveVideoContainer.topAnchor.constraint(equalTo: closeButtonContainer.bottomAnchor, constant: 5),
+            saveVideoContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
+            saveVideoContainer.heightAnchor.constraint(equalToConstant: 64),
+
+            saveVideoButton.leadingAnchor.constraint(equalTo: saveVideoContainer.leadingAnchor, constant: 10),
+            saveVideoButton.centerYAnchor.constraint(equalTo: saveVideoContainer.centerYAnchor),
+            saveVideoButton.trailingAnchor.constraint(equalTo: saveVideoContainer.trailingAnchor, constant: -10),
+
+            // Export overlay — covers entire screen including safe area
+            exportOverlay.topAnchor.constraint(equalTo: view.topAnchor),
+            exportOverlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            exportOverlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            exportOverlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            // Success checkmark — 200×200 centred on screen
+            exportSuccessView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            exportSuccessView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            exportSuccessView.widthAnchor.constraint(equalToConstant: 200),
+            exportSuccessView.heightAnchor.constraint(equalToConstant: 200),
         ])
     }
 
@@ -297,18 +413,18 @@ final class SplitVideoView: UIViewController {
         editButton.addTarget(self, action: #selector(editTapped), for: .touchUpInside)
         restartButton.addTarget(self, action: #selector(restartTapped), for: .touchUpInside)
         stopSessionButton.addTarget(self, action: #selector(stopSessionTapped), for: .touchUpInside)
+        saveVideoButton.addTarget(self, action: #selector(saveVideoTapped), for: .touchUpInside)
 
         leftContainer.addButton.addTarget(self, action: #selector(addLeftTapped), for: .touchUpInside)
         rightContainer.addButton.addTarget(self, action: #selector(addRightTapped), for: .touchUpInside)
         leftContainer.scrubSlider.addTarget(self, action: #selector(leftSliderChanged(_:)), for: .valueChanged)
         rightContainer.scrubSlider.addTarget(self, action: #selector(rightSliderChanged(_:)), for: .valueChanged)
-        
+
         sharedPlayPauseButton.addTarget(self, action: #selector(sharedPlayPauseTapped), for: .touchUpInside)
         sharedScrubSlider.addTarget(self, action: #selector(sharedSliderChanged(_:)), for: .valueChanged)
 
         sharedFrameDial.onDragBegan = { [weak self] in
             guard let self else { return }
-            // ✅ Pause if linked players are playing
             if self.isSharedPlaying {
                 self.leftPlayer?.pause()
                 self.rightPlayer?.pause()
@@ -318,21 +434,19 @@ final class SplitVideoView: UIViewController {
             guard let leftP = self.leftPlayer else { return }
             self.sharedTrackedLeftSeconds = CMTimeGetSeconds(leftP.currentTime())
         }
-        
+
         sharedFrameDial.onFrameStep = { [weak self] delta in
             self?.stepLinkedFrame(delta: delta)
         }
     }
-    
+
     // MARK: - Core Logic
 
     private func removeLeftObservers() {
-        // Remove the periodic time observer from the current leftPlayer
         if let obs = leftTimeObserver {
             leftPlayer?.removeTimeObserver(obs)
             leftTimeObserver = nil
         }
-        // Also remove the boundary observer from the current leftPlayer
         removeBoundaryObserver()
     }
 
@@ -342,7 +456,7 @@ final class SplitVideoView: UIViewController {
             rightTimeObserver = nil
         }
     }
-    
+
     private func configurePlayers() {
         configureLeftPlayer()
         configureRightPlayer()
@@ -350,7 +464,6 @@ final class SplitVideoView: UIViewController {
     }
 
     private func configureLeftPlayer() {
-        // CLEANUP FIRST: Remove observers from the existing instance before replacing it
         removeLeftObservers()
         leftPlayer?.pause()
         leftPlayer = nil
@@ -370,7 +483,6 @@ final class SplitVideoView: UIViewController {
     }
 
     private func configureRightPlayer() {
-        // CLEANUP FIRST
         removeRightObservers()
         rightPlayer?.pause()
         rightPlayer = nil
@@ -394,10 +506,10 @@ final class SplitVideoView: UIViewController {
             guard let self, let player, let container else { return }
             DispatchQueue.main.async {
                 guard let item = player.currentItem else { return }
-                
+
                 let dur = item.asset.duration
                 guard CMTIME_IS_NUMERIC(dur) else { return }
-                
+
                 let fps = 30.0
                 let total = max(1, Int(CMTimeGetSeconds(dur) * fps))
                 container.frameDial.totalFrames = total
@@ -406,11 +518,9 @@ final class SplitVideoView: UIViewController {
                 var trackedSeconds = CMTimeGetSeconds(player.currentTime())
 
                 container.frameDial.onDragBegan = { [weak self, weak player] in
-                    // ✅ Pause if playing when dial drag starts
                     if container.isPlaying {
                         container.pausePlayback()
                     }
-                    
                     let current = CMTimeGetSeconds(player?.currentTime() ?? .zero)
                     trackedSeconds = current
                     self?.sharedTrackedLeftSeconds = current
@@ -440,7 +550,7 @@ final class SplitVideoView: UIViewController {
     private func stepLinkedFrame(delta: Int) {
         guard let leftP = leftPlayer, let rightP = rightPlayer else { return }
         let fps = 30.0
-        
+
         sharedTrackedLeftSeconds += Double(delta) / fps
         let newLeft = sharedTrackedLeftSeconds
         let newRight = newLeft + syncOffsetSeconds
@@ -469,13 +579,13 @@ final class SplitVideoView: UIViewController {
         let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak player] time in
             guard let self = self, let p = player else { return }
             guard p.currentItem?.status == .readyToPlay else { return }
-            
+
             let current = CMTimeGetSeconds(time)
             var progress: Float = 0.0
             if let dur = p.currentItem?.duration, CMTIME_IS_NUMERIC(dur), CMTimeGetSeconds(dur) > 0 {
                 progress = Float(current / CMTimeGetSeconds(dur))
             }
-            
+
             DispatchQueue.main.async {
                 if self.isLinked {
                     if isLeft {
@@ -500,27 +610,28 @@ final class SplitVideoView: UIViewController {
     @objc private func linkTapped() {
         guard let leftP = leftPlayer, let rightP = rightPlayer else { return }
         isLinked.toggle()
-        
+
         if isLinked {
             linkButton.setTitle(" Unlink", for: .normal)
             linkButton.tintColor = .systemYellow
-            linkStartLeft = CMTimeGetSeconds(leftP.currentTime())
+            linkStartLeft  = CMTimeGetSeconds(leftP.currentTime())
             linkStartRight = CMTimeGetSeconds(rightP.currentTime())
             syncOffsetSeconds = linkStartRight - linkStartLeft
 
-            let leftDur = CMTIME_IS_NUMERIC(leftP.currentItem?.duration ?? .invalid) ? CMTimeGetSeconds(leftP.currentItem!.duration) : 0
+            let leftDur  = CMTIME_IS_NUMERIC(leftP.currentItem?.duration  ?? .invalid) ? CMTimeGetSeconds(leftP.currentItem!.duration)  : 0
             let rightDur = CMTIME_IS_NUMERIC(rightP.currentItem?.duration ?? .invalid) ? CMTimeGetSeconds(rightP.currentItem!.duration) : 0
-            linkedWindowBack = min(linkStartLeft, linkStartRight)
+            linkedWindowBack    = min(linkStartLeft, linkStartRight)
             linkedWindowForward = min(leftDur - linkStartLeft, rightDur - linkStartRight)
 
             installBoundaryObserver()
             leftP.pause(); rightP.pause(); isSharedPlaying = false
             updateSharedPlayPauseIcon()
-            leftContainer.controlsContainer.isHidden = true
+            leftContainer.controlsContainer.isHidden  = true
             rightContainer.controlsContainer.isHidden = true
             sharedControlsContainer.isHidden = false
+            saveVideoContainer.isHidden = false
 
-            sharedFrameDial.totalFrames = max(1, Int(linkedWindowDuration * 30.0))
+            sharedFrameDial.totalFrames  = max(1, Int(linkedWindowDuration * 30.0))
             sharedFrameDial.currentFrame = Int(linkedWindowBack * 30.0)
             sharedScrubSlider.value = linkedWindowDuration > 0 ? Float(linkedWindowBack / linkedWindowDuration) : 0
             sharedTimeLabel.text = "0:00.00"
@@ -529,13 +640,13 @@ final class SplitVideoView: UIViewController {
             linkButton.setTitle(" Link", for: .normal)
             linkButton.tintColor = .white
             sharedControlsContainer.isHidden = true
-            leftContainer.controlsContainer.isHidden = false
+            saveVideoContainer.isHidden = true
+            leftContainer.controlsContainer.isHidden  = false
             rightContainer.controlsContainer.isHidden = false
         }
     }
 
     @objc private func sharedSliderChanged(_ sender: UISlider) {
-        // ✅ Pause if linked players are playing
         if isSharedPlaying {
             leftPlayer?.pause()
             rightPlayer?.pause()
@@ -543,12 +654,12 @@ final class SplitVideoView: UIViewController {
             updateSharedPlayPauseIcon()
         }
         guard let leftP = leftPlayer, let rightP = rightPlayer, linkedWindowDuration > 0 else { return }
-        let relSecs = Double(sender.value) * linkedWindowDuration - linkedWindowBack
-        let safeLeft = linkStartLeft + relSecs
+        let relSecs  = Double(sender.value) * linkedWindowDuration - linkedWindowBack
+        let safeLeft  = linkStartLeft  + relSecs
         let safeRight = linkStartRight + relSecs
         sharedTimeLabel.text = formatRelativeTime(relSecs)
         sharedFrameDial.currentFrame = Int((relSecs + linkedWindowBack) * 30.0)
-        leftP.seek(to: CMTime(seconds: safeLeft, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        leftP.seek(to:  CMTime(seconds: safeLeft,  preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         rightP.seek(to: CMTime(seconds: safeRight, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
@@ -561,16 +672,14 @@ final class SplitVideoView: UIViewController {
             isSharedPlaying = false
             updateSharedPlayPauseIcon()
         } else {
-            // Check if left player is at or near the end of the linked window
             let currentLeft = CMTimeGetSeconds(lp.currentTime())
-            let windowEnd = linkStartLeft + linkedWindowForward
-            let nearEnd = currentLeft >= windowEnd - 0.1
+            let windowEnd   = linkStartLeft + linkedWindowForward
+            let nearEnd     = currentLeft >= windowEnd - 0.1
 
             if nearEnd {
-                // Seek both players back to their link start positions
-                let leftStart = CMTime(seconds: linkStartLeft, preferredTimescale: 600)
+                let leftStart  = CMTime(seconds: linkStartLeft,  preferredTimescale: 600)
                 let rightStart = CMTime(seconds: linkStartRight, preferredTimescale: 600)
-                lp.seek(to: leftStart, toleranceBefore: .zero, toleranceAfter: .zero)
+                lp.seek(to: leftStart,  toleranceBefore: .zero, toleranceAfter: .zero)
                 rp.seek(to: rightStart, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak lp, weak rp] _ in
                     lp?.play()
                     rp?.play()
@@ -588,12 +697,12 @@ final class SplitVideoView: UIViewController {
 
     private func updateSharedPlayPauseIcon() {
         let icon = isSharedPlaying ? "pause.circle.fill" : "play.circle.fill"
-        let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
+        let cfg  = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
         sharedPlayPauseButton.setImage(UIImage(systemName: icon, withConfiguration: cfg), for: .normal)
     }
 
     private func formatRelativeTime(_ secs: Double) -> String {
-        let sign = secs < -0.005 ? "-" : (secs > 0.005 ? "+" : " ")
+        let sign   = secs < -0.005 ? "-" : (secs > 0.005 ? "+" : " ")
         let absVal = Swift.abs(secs)
         let m = Int(absVal) / 60, s = Int(absVal) % 60, h = Int(absVal.truncatingRemainder(dividingBy: 1.0) * 100)
         return String(format: "%@%d:%02d.%02d", sign, m, s, h)
@@ -604,8 +713,9 @@ final class SplitVideoView: UIViewController {
         guard let leftP = leftPlayer, linkedWindowForward > 0 else { return }
         let boundary = CMTime(seconds: linkStartLeft + linkedWindowForward, preferredTimescale: 600)
         linkedBoundaryObserver = leftP.addBoundaryTimeObserver(forTimes: [NSValue(time: boundary)], queue: .main) { [weak self] in
-            guard let self = self else { return }
-            self.leftPlayer?.pause(); self.rightPlayer?.pause(); self.isSharedPlaying = false
+            guard let self else { return }
+            self.leftPlayer?.pause(); self.rightPlayer?.pause()
+            self.isSharedPlaying = false
             self.updateSharedPlayPauseIcon()
         }
     }
@@ -618,33 +728,27 @@ final class SplitVideoView: UIViewController {
     private func tearDownPlayers() {
         removeLeftObservers()
         removeRightObservers()
-
-        leftPlayer?.pause()
-        leftPlayer = nil
-        rightPlayer?.pause()
-        rightPlayer = nil
+        leftPlayer?.pause();  leftPlayer  = nil
+        rightPlayer?.pause(); rightPlayer = nil
     }
 
-    @objc private func closeTapped() { tearDownPlayers(); dismiss(animated: true) { self.onDismiss?() } }
-    @objc private func restartTapped() { onRestartRequested?() }
-    @objc private func stopSessionTapped() { onStopSessionRequested?() }
-    @objc private func addLeftTapped() { leftContainer.showLoading(); presentPicker(forLeft: true) }
-    @objc private func addRightTapped() { rightContainer.showLoading(); presentPicker(forLeft: false) }
-    
+    @objc private func closeTapped()        { tearDownPlayers(); dismiss(animated: true) { self.onDismiss?() } }
+    @objc private func restartTapped()      { onRestartRequested?() }
+    @objc private func stopSessionTapped()  { onStopSessionRequested?() }
+    @objc private func addLeftTapped()      { leftContainer.showLoading();  presentPicker(forLeft: true) }
+    @objc private func addRightTapped()     { rightContainer.showLoading(); presentPicker(forLeft: false) }
+
     private func presentPicker(forLeft: Bool) {
         let picker = UIImagePickerController()
-        picker.sourceType = .savedPhotosAlbum; picker.mediaTypes = [UTType.movie.identifier]
-        picker.delegate = self
-        picker.view.tag = forLeft ? 1 : 2
+        picker.sourceType  = .savedPhotosAlbum
+        picker.mediaTypes  = [UTType.movie.identifier]
+        picker.delegate    = self
+        picker.view.tag    = forLeft ? 1 : 2
         present(picker, animated: true)
     }
 
     @objc private func leftSliderChanged(_ sender: UISlider) {
-        // ✅ Pause if playing
-        if leftContainer.isPlaying {
-            leftContainer.pausePlayback()
-        }
-        
+        if leftContainer.isPlaying { leftContainer.pausePlayback() }
         guard let p = leftPlayer, let dur = p.currentItem?.duration, CMTIME_IS_NUMERIC(dur) else { return }
         let target = Double(sender.value) * CMTimeGetSeconds(dur)
         leftContainer.updateSlider(value: sender.value, currentTime: target, totalTime: 0)
@@ -652,11 +756,7 @@ final class SplitVideoView: UIViewController {
     }
 
     @objc private func rightSliderChanged(_ sender: UISlider) {
-        // ✅ Pause if playing
-        if rightContainer.isPlaying {
-            rightContainer.pausePlayback()
-        }
-        
+        if rightContainer.isPlaying { rightContainer.pausePlayback() }
         guard let p = rightPlayer, let dur = p.currentItem?.duration, CMTIME_IS_NUMERIC(dur) else { return }
         let target = Double(sender.value) * CMTimeGetSeconds(dur)
         rightContainer.updateSlider(value: sender.value, currentTime: target, totalTime: 0)
@@ -672,73 +772,60 @@ final class SplitVideoView: UIViewController {
     @objc private func handleRemoveNotification(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let container = userInfo["container"] as? VideoPaneView else { return }
-        if isLinked { linkTapped() } // Unlink first
+        if isLinked { linkTapped() }
         if container === leftContainer {
             removeLeftObservers()
-            leftPlayer?.pause()
-            leftPlayer = nil
-            leftURL = nil
-            leftContainer.clearPlayer()
-            leftContainer.showAddButton()
+            leftPlayer?.pause(); leftPlayer = nil; leftURL = nil
+            leftContainer.clearPlayer(); leftContainer.showAddButton()
         } else if container === rightContainer {
             removeRightObservers()
-            rightPlayer?.pause()
-            rightPlayer = nil
-            rightURL = nil
-            rightContainer.clearPlayer()
-            rightContainer.showAddButton()
+            rightPlayer?.pause(); rightPlayer = nil; rightURL = nil
+            rightContainer.clearPlayer(); rightContainer.showAddButton()
         }
 
-        // ✅ Exit edit mode after a removal so the user doesn't stay in editing state
         if isEditMode {
             isEditMode = false
-            leftContainer.toggleEditMode()
-            rightContainer.toggleEditMode()
+            leftContainer.toggleEditMode(); rightContainer.toggleEditMode()
             editButton.tintColor = .white
         }
-
         updateLinkButtonState()
     }
-    
+
     private func setupTapGesture() {
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleViewTap))
         tap.cancelsTouchesInView = false
         tap.delegate = self
         view.addGestureRecognizer(tap)
     }
-    
+
     @objc private func handleViewTap() {
         controlsVisible.toggle()
         UIView.animate(withDuration: 0.25) {
-            self.closeButtonContainer.alpha = self.controlsVisible ? 1 : 0
-            self.topRightContainer.alpha = self.controlsVisible ? 1 : 0
+            self.closeButtonContainer.alpha  = self.controlsVisible ? 1 : 0
+            self.topRightContainer.alpha     = self.controlsVisible ? 1 : 0
+            // Save button follows the same hide/show rhythm as the other controls,
+            // but only if it's actually visible (i.e. we are linked).
+            if !self.saveVideoContainer.isHidden {
+                self.saveVideoContainer.alpha = self.controlsVisible ? 1 : 0
+            }
         }
     }
-    
+
     private func updateLinkButtonState() {
         let bothPlayersExist = (leftPlayer != nil && rightPlayer != nil)
-        let anyPlayerExists = (leftPlayer != nil || rightPlayer != nil)
-        
-        // 1. Update Link Button state and color
+        let anyPlayerExists  = (leftPlayer != nil || rightPlayer != nil)
+
         linkButton.isEnabled = bothPlayersExist
         linkButton.tintColor = bothPlayersExist ? (isLinked ? .systemYellow : .white) : .systemGray
-        
-        // 2. Update Edit Button state
+
         editButton.isEnabled = anyPlayerExists
-        
-        // 3. FIX: Update Edit Button color so it doesn't stay gray when enabled
         if anyPlayerExists {
-            // If enabled, use Yellow if active, otherwise White
             editButton.tintColor = isEditMode ? .systemYellow : .white
         } else {
-            // If no videos exist, button must be gray
             editButton.tintColor = .systemGray
-            
-            // Safety: If all videos were removed, force exit Edit Mode
             if isEditMode {
                 isEditMode = false
-                leftContainer.toggleEditMode()
-                rightContainer.toggleEditMode()
+                leftContainer.toggleEditMode(); rightContainer.toggleEditMode()
             }
         }
     }
@@ -746,15 +833,97 @@ final class SplitVideoView: UIViewController {
     private func updateStackAxisForOrientation() {
         stackView.axis = view.bounds.width > view.bounds.height ? .horizontal : .vertical
     }
+
+    // MARK: - Split Video Export
+
+    @objc private func saveVideoTapped() {
+        guard
+            let leftURL  = leftURL,
+            let rightURL = rightURL,
+            isLinked
+        else { return }
+
+        // Time ranges: each covers the full linked window
+        let leftStart  = CMTime(seconds: linkStartLeft  - linkedWindowBack, preferredTimescale: 600)
+        let rightStart = CMTime(seconds: linkStartRight - linkedWindowBack, preferredTimescale: 600)
+        let duration   = CMTime(seconds: linkedWindowDuration,              preferredTimescale: 600)
+
+        let leftTimeRange  = CMTimeRange(start: leftStart,  duration: duration)
+        let rightTimeRange = CMTimeRange(start: rightStart, duration: duration)
+
+        // Force a layout pass so bounds reflect the current orientation.
+        // Without this, bounds may still hold the previous orientation's dimensions.
+        view.layoutIfNeeded()
+
+        // Read the current zoom/pan state from each pane
+        let leftZoom  = leftContainer.zoomState
+        let rightZoom = rightContainer.zoomState
+
+        // Pane view sizes in points — used to convert UIKit pan offset to pixel space.
+        // We use the VideoPaneView's own bounds (gesture translation is relative to it).
+        let leftViewSize  = leftContainer.playerViewBounds
+        let rightViewSize = rightContainer.playerViewBounds
+
+        let isLandscape = view.bounds.width > view.bounds.height
+
+        let config = SplitExportConfig(
+            leftURL:        leftURL,
+            rightURL:       rightURL,
+            leftTimeRange:  leftTimeRange,
+            rightTimeRange: rightTimeRange,
+            leftZoom:       leftZoom.scale,
+            leftOffset:     leftZoom.offset,
+            rightZoom:      rightZoom.scale,
+            rightOffset:    rightZoom.offset,
+            leftViewSize:   leftViewSize.width  > 0 ? leftViewSize  : CGSize(width: 1, height: 1),
+            rightViewSize:  rightViewSize.width > 0 ? rightViewSize : CGSize(width: 1, height: 1),
+            isLandscape:    isLandscape
+        )
+
+        // Show blocking overlay
+        exportOverlay.isHidden = false
+
+        exportToken = SplitVideoExportManager.export(
+            config: config,
+            progress: { _ in },   // no progress bar — spinner covers the wait
+            completion: { [weak self] result in
+                guard let self else { return }
+                self.exportOverlay.isHidden = true
+                self.exportToken = nil
+                switch result {
+                case .success:
+                    self.showExportSuccessFeedback()
+                case .failure(let error):
+                    self.showExportAlert(title: "Export Failed", message: error.localizedDescription)
+                }
+            }
+        )
+    }
+
+    private func showExportSuccessFeedback() {
+        exportSuccessView.alpha = 1
+        UIView.animate(withDuration: 0.3, delay: 2.0) {
+            self.exportSuccessView.alpha = 0
+        }
+    }
+
+    private func showExportAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
 }
 
 // MARK: - Delegate Extensions
+
 extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIGestureRecognizerDelegate {
+
     func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
         picker.view.tag == 1 ? leftContainer.hideLoading() : rightContainer.hideLoading()
         picker.dismiss(animated: true)
     }
-    func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+
+    func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
         defer {
             if picker.view.tag == 1 { leftContainer.hideLoading() } else { rightContainer.hideLoading() }
             picker.dismiss(animated: true)
@@ -762,9 +931,9 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
         guard let url = info[.mediaURL] as? URL else { return }
 
         if isLinked { linkTapped() }
-        
-        if picker.view.tag == 1 { // Left Side
-            removeLeftObservers() // REMOVE OLD OBSERVER BEFORE CREATING NEW PLAYER
+
+        if picker.view.tag == 1 {
+            removeLeftObservers()
             leftURL = url
             let player = AVPlayer(url: url)
             leftPlayer = player
@@ -774,8 +943,8 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
             leftContainer.attachEndObserver()
             addTimeObserver(for: player, isLeft: true)
             setupDial(for: leftContainer, player: player)
-        } else { // Right Side
-            removeRightObservers() // REMOVE OLD OBSERVER BEFORE CREATING NEW PLAYER
+        } else {
+            removeRightObservers()
             rightURL = url
             let player = AVPlayer(url: url)
             rightPlayer = player
@@ -788,15 +957,15 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
         }
         updateLinkButtonState()
     }
-    
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         let excluded: [UIView] = [
             closeButtonContainer,
             topRightContainer,
             sharedControlsContainer,
+            saveVideoContainer,
             leftContainer.controlsContainer,
             rightContainer.controlsContainer,
-            // ADDED: Explicitly exclude add/remove buttons
             leftContainer.addButton,
             leftContainer.removeButton,
             rightContainer.addButton,
@@ -808,28 +977,29 @@ extension SplitVideoView: UIImagePickerControllerDelegate, UINavigationControlle
 }
 
 // MARK: - VideoPaneView
+
 private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
     private var itemDidEndObserver: NSObjectProtocol?
 
     let playerView = PlayerContainerView()
-    let addButton = UIButton(type: .system)
+    let addButton  = UIButton(type: .system)
     let removeButton = UIButton(type: .system)
     let controlsContainer = UIView()
-    let playPauseButton = UIButton(type: .system)
-    
+    let playPauseButton   = UIButton(type: .system)
+
     let scrubSlider: UISlider = {
         let s = UISlider()
-        let thumbSize: CGFloat = 20
+        let thumbSize: CGFloat  = 20
         let strokeWidth: CGFloat = 1.5
-        let padding: CGFloat = 1.5
+        let padding: CGFloat    = 1.5
 
         let thumbImage = UIGraphicsImageRenderer(size: CGSize(width: thumbSize, height: thumbSize))
-            .image { context in
+            .image { _ in
                 let fillSize = thumbSize - (strokeWidth * 2) - (padding * 2)
                 let fillRect = CGRect(x: padding + strokeWidth, y: padding + strokeWidth, width: fillSize, height: fillSize)
                 UIColor.white.setFill()
                 UIBezierPath(ovalIn: fillRect).fill()
-                
+
                 let strokeRect = CGRect(x: padding, y: padding, width: thumbSize - (padding * 2), height: thumbSize - (padding * 2))
                 UIColor.systemYellow.setStroke()
                 let strokePath = UIBezierPath(ovalIn: strokeRect)
@@ -843,19 +1013,33 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
         s.translatesAutoresizingMaskIntoConstraints = false
         return s
     }()
-    
-    let timeLabel = UILabel()
+
+    let timeLabel      = UILabel()
     let loadingSpinner = UIActivityIndicatorView(style: .large)
-    let frameDial = FrameDial()
+    let frameDial      = FrameDial()
     private(set) var isPlaying = false
     var isInEditMode = false
     private let zoomContainer = UIView()
 
-    // Zoom/Pan State
-    private var currentScale: CGFloat = 1.0
-    private var lastScale: CGFloat = 1.0
-    private var currentOffset: CGPoint = .zero
-    private var lastOffset: CGPoint = .zero
+    // Zoom/Pan state
+    private var currentScale:  CGFloat  = 1.0
+    private var lastScale:     CGFloat  = 1.0
+    private var currentOffset: CGPoint  = .zero
+    private var lastOffset:    CGPoint  = .zero
+
+    /// Exposes the current zoom and pan state for export.
+    /// No access-control changes needed — same file scope.
+    var zoomState: (scale: CGFloat, offset: CGPoint) {
+        (scale: currentScale, offset: currentOffset)
+    }
+
+    /// The size of this pane view in UIKit points — used by the exporter to convert
+    /// the user's pan offset (which is in this view's coordinate space) to pixel space.
+    /// We use the VideoPaneView's own bounds, not playerView.bounds, because
+    /// gesture.translation(in: self) is relative to the pane, not the player layer.
+    var playerViewBounds: CGSize {
+        bounds.size
+    }
 
     init() { super.init(frame: .zero); setup(); setupGestures() }
     required init?(coder: NSCoder) { fatalError() }
@@ -863,45 +1047,89 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
     private func setup() {
         backgroundColor = .black; clipsToBounds = true
         playerView.translatesAutoresizingMaskIntoConstraints = false
-        
+
         addButton.setTitle("Add Video", for: .normal)
         addButton.setTitleColor(.white, for: .normal)
         addButton.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1)
         addButton.layer.cornerRadius = 12; addButton.translatesAutoresizingMaskIntoConstraints = false
-        
+
         removeButton.setTitle("Remove", for: .normal)
         removeButton.setTitleColor(.white, for: .normal)
         removeButton.backgroundColor = addButton.backgroundColor
-        removeButton.layer.cornerRadius = 12; removeButton.translatesAutoresizingMaskIntoConstraints = false; removeButton.isHidden = true
+        removeButton.layer.cornerRadius = 12; removeButton.translatesAutoresizingMaskIntoConstraints = false
+        removeButton.isHidden = true
         removeButton.addTarget(self, action: #selector(removeVideoTapped), for: .touchUpInside)
 
         loadingSpinner.color = .white; loadingSpinner.translatesAutoresizingMaskIntoConstraints = false
-        controlsContainer.backgroundColor = UIColor.black.withAlphaComponent(0.7); controlsContainer.layer.cornerRadius = 24; controlsContainer.translatesAutoresizingMaskIntoConstraints = false
+        controlsContainer.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        controlsContainer.layer.cornerRadius = 24; controlsContainer.translatesAutoresizingMaskIntoConstraints = false
 
         let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
         playPauseButton.setImage(UIImage(systemName: "play.circle.fill", withConfiguration: cfg), for: .normal)
-        playPauseButton.tintColor = .white; playPauseButton.translatesAutoresizingMaskIntoConstraints = false; playPauseButton.addTarget(self, action: #selector(togglePlayPause), for: .touchUpInside)
+        playPauseButton.tintColor = .white; playPauseButton.translatesAutoresizingMaskIntoConstraints = false
+        playPauseButton.addTarget(self, action: #selector(togglePlayPause), for: .touchUpInside)
 
-        timeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular); timeLabel.textColor = .white; timeLabel.text = "00:00.00"; timeLabel.translatesAutoresizingMaskIntoConstraints = false
+        timeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        timeLabel.textColor = .white; timeLabel.text = "00:00.00"
+        timeLabel.translatesAutoresizingMaskIntoConstraints = false
 
         zoomContainer.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(zoomContainer); zoomContainer.addSubview(playerView); addSubview(addButton); addSubview(removeButton); addSubview(loadingSpinner); addSubview(controlsContainer)
-        controlsContainer.addSubview(playPauseButton); controlsContainer.addSubview(scrubSlider); controlsContainer.addSubview(timeLabel); frameDial.translatesAutoresizingMaskIntoConstraints = false; controlsContainer.addSubview(frameDial)
+        addSubview(zoomContainer); zoomContainer.addSubview(playerView)
+        addSubview(addButton); addSubview(removeButton); addSubview(loadingSpinner); addSubview(controlsContainer)
+        controlsContainer.addSubview(playPauseButton); controlsContainer.addSubview(scrubSlider)
+        controlsContainer.addSubview(timeLabel)
+        frameDial.translatesAutoresizingMaskIntoConstraints = false
+        controlsContainer.addSubview(frameDial)
 
         NSLayoutConstraint.activate([
-            zoomContainer.topAnchor.constraint(equalTo: topAnchor), zoomContainer.leadingAnchor.constraint(equalTo: leadingAnchor), zoomContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
-            playerView.topAnchor.constraint(equalTo: zoomContainer.topAnchor), playerView.leadingAnchor.constraint(equalTo: zoomContainer.leadingAnchor), playerView.trailingAnchor.constraint(equalTo: zoomContainer.trailingAnchor), playerView.bottomAnchor.constraint(equalTo: zoomContainer.bottomAnchor),
-            controlsContainer.topAnchor.constraint(equalTo: zoomContainer.bottomAnchor, constant: 8), controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10), controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10), controlsContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10), controlsContainer.heightAnchor.constraint(equalToConstant: 82),
-            addButton.centerXAnchor.constraint(equalTo: playerView.centerXAnchor), addButton.centerYAnchor.constraint(equalTo: playerView.centerYAnchor), addButton.widthAnchor.constraint(equalToConstant: 140), addButton.heightAnchor.constraint(equalToConstant: 44),
-            removeButton.centerXAnchor.constraint(equalTo: playerView.centerXAnchor), removeButton.centerYAnchor.constraint(equalTo: playerView.centerYAnchor), removeButton.widthAnchor.constraint(equalToConstant: 140), removeButton.heightAnchor.constraint(equalToConstant: 44),
-            loadingSpinner.centerXAnchor.constraint(equalTo: playerView.centerXAnchor), loadingSpinner.centerYAnchor.constraint(equalTo: playerView.centerYAnchor),
-            playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 8), playPauseButton.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 6), playPauseButton.widthAnchor.constraint(equalToConstant: 32), playPauseButton.heightAnchor.constraint(equalToConstant: 32),
-            timeLabel.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -12), timeLabel.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor), timeLabel.widthAnchor.constraint(equalToConstant: 72),
-            scrubSlider.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 10), scrubSlider.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -10), scrubSlider.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
-            frameDial.centerXAnchor.constraint(equalTo: scrubSlider.centerXAnchor), frameDial.widthAnchor.constraint(equalTo: scrubSlider.widthAnchor, multiplier: 0.75), frameDial.topAnchor.constraint(equalTo: playPauseButton.bottomAnchor, constant: 4), frameDial.heightAnchor.constraint(equalToConstant: 28)
+            zoomContainer.topAnchor.constraint(equalTo: topAnchor),
+            zoomContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            zoomContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+            playerView.topAnchor.constraint(equalTo: zoomContainer.topAnchor),
+            playerView.leadingAnchor.constraint(equalTo: zoomContainer.leadingAnchor),
+            playerView.trailingAnchor.constraint(equalTo: zoomContainer.trailingAnchor),
+            playerView.bottomAnchor.constraint(equalTo: zoomContainer.bottomAnchor),
+
+            controlsContainer.topAnchor.constraint(equalTo: zoomContainer.bottomAnchor, constant: 8),
+            controlsContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            controlsContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            controlsContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            controlsContainer.heightAnchor.constraint(equalToConstant: 82),
+
+            addButton.centerXAnchor.constraint(equalTo: playerView.centerXAnchor),
+            addButton.centerYAnchor.constraint(equalTo: playerView.centerYAnchor),
+            addButton.widthAnchor.constraint(equalToConstant: 140),
+            addButton.heightAnchor.constraint(equalToConstant: 44),
+
+            removeButton.centerXAnchor.constraint(equalTo: playerView.centerXAnchor),
+            removeButton.centerYAnchor.constraint(equalTo: playerView.centerYAnchor),
+            removeButton.widthAnchor.constraint(equalToConstant: 140),
+            removeButton.heightAnchor.constraint(equalToConstant: 44),
+
+            loadingSpinner.centerXAnchor.constraint(equalTo: playerView.centerXAnchor),
+            loadingSpinner.centerYAnchor.constraint(equalTo: playerView.centerYAnchor),
+
+            playPauseButton.leadingAnchor.constraint(equalTo: controlsContainer.leadingAnchor, constant: 8),
+            playPauseButton.topAnchor.constraint(equalTo: controlsContainer.topAnchor, constant: 6),
+            playPauseButton.widthAnchor.constraint(equalToConstant: 32),
+            playPauseButton.heightAnchor.constraint(equalToConstant: 32),
+
+            timeLabel.trailingAnchor.constraint(equalTo: controlsContainer.trailingAnchor, constant: -12),
+            timeLabel.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
+            timeLabel.widthAnchor.constraint(equalToConstant: 72),
+
+            scrubSlider.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 10),
+            scrubSlider.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -10),
+            scrubSlider.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
+
+            frameDial.centerXAnchor.constraint(equalTo: scrubSlider.centerXAnchor),
+            frameDial.widthAnchor.constraint(equalTo: scrubSlider.widthAnchor, multiplier: 0.75),
+            frameDial.topAnchor.constraint(equalTo: playPauseButton.bottomAnchor, constant: 4),
+            frameDial.heightAnchor.constraint(equalToConstant: 28),
         ])
     }
-    
+
     func pausePlayback() {
         playerView.player?.pause()
         isPlaying = false
@@ -912,7 +1140,7 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         pinch.delegate = self
         addGestureRecognizer(pinch)
-        
+
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         pan.delegate = self
         addGestureRecognizer(pan)
@@ -929,10 +1157,10 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
 
         case .ended, .cancelled, .failed:
             if currentScale < 1.0 {
-                currentScale = 1.0
+                currentScale  = 1.0
                 currentOffset = .zero
-                lastScale = 1.0
-                lastOffset = .zero
+                lastScale     = 1.0
+                lastOffset    = .zero
                 UIView.animate(withDuration: 0.35,
                                delay: 0,
                                usingSpringWithDamping: 0.7,
@@ -955,7 +1183,7 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func updateTransform() {
-        let scaleT = CGAffineTransform(scaleX: currentScale, y: currentScale)
+        let scaleT     = CGAffineTransform(scaleX: currentScale, y: currentScale)
         let translateT = CGAffineTransform(translationX: currentOffset.x, y: currentOffset.y)
         playerView.transform = scaleT.concatenating(translateT)
     }
@@ -963,18 +1191,12 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         return true
     }
-    
-    // NEW: Prevents zoom/pan when touching the scrub bar or frame dial container
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         guard let touchView = touch.view else { return true }
-        
-        // Exclude the controls container and any buttons from triggering the drag/zoom
         let excludedViews: [UIView] = [controlsContainer, addButton, removeButton]
-        
         for view in excludedViews {
-            if touchView.isDescendant(of: view) {
-                return false
-            }
+            if touchView.isDescendant(of: view) { return false }
         }
         return true
     }
@@ -987,11 +1209,10 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
             isPlaying = false
             updatePlayPauseIcon()
         } else {
-            // If at (or very near) the end, seek to start first
             let duration = p.currentItem?.duration ?? .zero
-            let current = p.currentTime()
-            let nearEnd = CMTIME_IS_NUMERIC(duration) &&
-                          CMTimeGetSeconds(current) >= CMTimeGetSeconds(duration) - 0.1
+            let current  = p.currentTime()
+            let nearEnd  = CMTIME_IS_NUMERIC(duration) &&
+                           CMTimeGetSeconds(current) >= CMTimeGetSeconds(duration) - 0.1
 
             if nearEnd {
                 p.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak p] _ in
@@ -1009,20 +1230,17 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
 
     func updatePlayPauseIcon() {
         let name = isPlaying ? "pause.circle.fill" : "play.circle.fill"
-        let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
+        let cfg  = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
         playPauseButton.setImage(UIImage(systemName: name, withConfiguration: cfg), for: .normal)
     }
-    
-    func showVideo() { addButton.isHidden = true; removeButton.isHidden = true; controlsContainer.isHidden = false }
-    
-    func showAddButton() { addButton.isHidden = false; removeButton.isHidden = true; controlsContainer.isHidden = true }
-    
-    func showLoading() { addButton.isHidden = true; loadingSpinner.startAnimating(); loadingSpinner.isHidden = false }
-    
-    func hideLoading() { loadingSpinner.stopAnimating(); loadingSpinner.isHidden = true; if playerView.player == nil { showAddButton() } }
+
+    func showVideo()      { addButton.isHidden = true;  removeButton.isHidden = true;  controlsContainer.isHidden = false }
+    func showAddButton()  { addButton.isHidden = false; removeButton.isHidden = true;  controlsContainer.isHidden = true  }
+    func showLoading()    { addButton.isHidden = true;  loadingSpinner.startAnimating(); loadingSpinner.isHidden = false }
+    func hideLoading()    { loadingSpinner.stopAnimating(); loadingSpinner.isHidden = true; if playerView.player == nil { showAddButton() } }
     func toggleEditMode() { isInEditMode.toggle(); isInEditMode ? showRemoveButton() : (playerView.player != nil ? showVideo() : showAddButton()) }
     func showRemoveButton() { addButton.isHidden = true; removeButton.isHidden = false; controlsContainer.isHidden = true }
-    
+
     func clearPlayer() {
         if let obs = itemDidEndObserver {
             NotificationCenter.default.removeObserver(obs)
@@ -1032,20 +1250,24 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
         isPlaying = false
         updatePlayPauseIcon()
     }
-    
+
     func resetPlayState() { isPlaying = false; updatePlayPauseIcon(); scrubSlider.value = 0; timeLabel.text = "00:00.00" }
-    
-    @objc private func removeVideoTapped() { NotificationCenter.default.post(name: Notification.Name("VideoPaneViewRemoveTapped"), object: nil, userInfo: ["container": self]) }
-    
-    func updateSlider(value: Float, currentTime: Double, totalTime: Double) { timeLabel.text = formatTime(currentTime); if !scrubSlider.isTracking { scrubSlider.value = value } }
-    
+
+    @objc private func removeVideoTapped() {
+        NotificationCenter.default.post(name: Notification.Name("VideoPaneViewRemoveTapped"), object: nil, userInfo: ["container": self])
+    }
+
+    func updateSlider(value: Float, currentTime: Double, totalTime: Double) {
+        timeLabel.text = formatTime(currentTime)
+        if !scrubSlider.isTracking { scrubSlider.value = value }
+    }
+
     private func formatTime(_ secs: Double) -> String {
         let m = Int(secs) / 60, s = Int(secs) % 60, h = Int(secs.truncatingRemainder(dividingBy: 1.0) * 100)
         return String(format: "%02d:%02d.%02d", m, s, h)
     }
-    
+
     func attachEndObserver() {
-        // Remove any existing observer first
         if let obs = itemDidEndObserver {
             NotificationCenter.default.removeObserver(obs)
             itemDidEndObserver = nil
@@ -1062,8 +1284,13 @@ private final class VideoPaneView: UIView, UIGestureRecognizerDelegate {
     }
 }
 
+// MARK: - PlayerContainerView
+
 private final class PlayerContainerView: UIView {
     override static var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-    var player: AVPlayer? { get { playerLayer.player } set { playerLayer.videoGravity = .resizeAspect; playerLayer.player = newValue } }
+    var player: AVPlayer? {
+        get { playerLayer.player }
+        set { playerLayer.videoGravity = .resizeAspect; playerLayer.player = newValue }
+    }
 }
