@@ -354,6 +354,13 @@ final class DelayedCameraView: UIView {
             name: UIDevice.orientationDidChangeNotification,
             object: nil
         )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
 
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap)))
     }
@@ -867,6 +874,11 @@ final class DelayedCameraView: UIView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.forceOrientationUpdate()
         }
+    }
+    
+    @objc private func appDidEnterBackground() {
+        guard isShowingDelayed, !isPaused else { return }
+        pausePlayback()
     }
     
     private var parentViewController: UIViewController? {
