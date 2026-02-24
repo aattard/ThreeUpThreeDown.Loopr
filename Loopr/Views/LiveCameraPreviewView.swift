@@ -130,6 +130,74 @@ class LiveCameraPreviewView: UIView {
         }
     }
     
+    // MARK: - Camera Diagnostics
+    
+    private func logCameraCapabilities() {
+        print("========================================")
+        print("📷 CAMERA CAPABILITIES DIAGNOSTIC")
+        print("========================================")
+        
+        let discoverySession = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTelephotoCamera],
+            mediaType: .video,
+            position: .unspecified
+        )
+        
+        for device in discoverySession.devices {
+            let position = device.position == .front ? "Front" : "Back"
+            print("--- Camera: \(device.localizedName) ---")
+            print("  Position: \(position)")
+            print("  Device Type: \(device.deviceType)")
+            print("  Min Zoom: \(device.minAvailableVideoZoomFactor)")
+            print("  Max Zoom: \(device.maxAvailableVideoZoomFactor)")
+            print("  Switch Over Zoom Factors: \(device.virtualDeviceSwitchOverVideoZoomFactors)")
+            print("  Active Format Min Zoom (Center Stage): \(device.activeFormat.videoMinZoomFactorForCenterStage)")
+            print("  Center Stage Active: \(device.isCenterStageActive)")
+            print("-------------------------------------")
+        }
+        
+        print("========================================")
+    }
+    
+    // MARK: - Ultra-Wide Detection
+    
+    /// Returns true if an ultra-wide camera exists for the given position.
+    static func ultraWideCameraAvailable(for position: AVCaptureDevice.Position) -> Bool {
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInUltraWideCamera],
+            mediaType: .video,
+            position: position
+        )
+        return !session.devices.isEmpty
+    }
+    
+    /// Convenience helper using the current camera position setting.
+    static func ultraWideCameraAvailableForCurrentPosition() -> Bool {
+        let position: AVCaptureDevice.Position = Settings.shared.useFrontCamera ? .front : .back
+        return ultraWideCameraAvailable(for: position)
+    }
+    
+    // MARK: - Device Selection
+    
+    /// Picks the correct AVCaptureDevice based on position and ultra-wide setting.
+    private func selectCameraDevice(useFrontCamera: Bool, useUltraWide: Bool) -> AVCaptureDevice? {
+        let position: AVCaptureDevice.Position = useFrontCamera ? .front : .back
+        
+        if useUltraWide {
+            // Try ultra-wide first; fall back to wide angle if not available
+            if let ultraWide = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: position) {
+                print("📷 Using ultra-wide camera (\(position == .front ? "front" : "back"))")
+                return ultraWide
+            } else {
+                print("⚠️ Ultra-wide not available for \(position == .front ? "front" : "back") position, falling back to wide angle")
+            }
+        }
+        
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+    }
+    
+    // MARK: - Preview Start/Stop
+    
     func startPreview(useFrontCamera: Bool, completion: (() -> Void)? = nil) {
         print("📷 Starting live preview")
         self.isFrontCamera = useFrontCamera
@@ -141,14 +209,17 @@ class LiveCameraPreviewView: UIView {
             session.beginConfiguration()
             session.sessionPreset = .high
             
-            let position: AVCaptureDevice.Position = useFrontCamera ? .front : .back
-            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+            let useUltraWide = Settings.shared.useUltraWideCamera
+            guard let camera = self.selectCameraDevice(useFrontCamera: useFrontCamera, useUltraWide: useUltraWide) else {
                 print("❌ No camera found for preview")
                 session.commitConfiguration()
                 return
             }
             
             self.currentDevice = camera
+            
+            // Log camera capabilities for diagnostics
+            self.logCameraCapabilities()
             
             // Check for 60fps support
             self.supports60FPS = self.checkFPSSupport(device: camera, fps: 60)
@@ -255,6 +326,8 @@ class LiveCameraPreviewView: UIView {
         }
     }
     
+    // MARK: - Zoom
+    
     func applyZoom(_ zoomFactor: CGFloat) {
         guard let device = currentDevice else { return }
         
@@ -265,7 +338,7 @@ class LiveCameraPreviewView: UIView {
             let maxZoom = device.activeFormat.videoMaxZoomFactor
             let minZoom = device.minAvailableVideoZoomFactor
             
-            // Apply custom limits: 0.5x to 10x
+            // Apply custom limits: 0.5x to 5x
             let customMinZoom: CGFloat = 0.5
             let customMaxZoom: CGFloat = 5.0
             
@@ -302,10 +375,8 @@ class LiveCameraPreviewView: UIView {
             lastZoomFactor = device.videoZoomFactor
             
         case .changed:
-            // Balanced zoom sensitivity
             let pinchScale = gesture.scale
-            
-            let delta = (pinchScale - 1.0) * 0.9  // Increased from 0.15 to 0.25
+            let delta = (pinchScale - 1.0) * 0.9
             let newZoomFactor = lastZoomFactor * (1.0 + delta)
             
             applyZoom(newZoomFactor)

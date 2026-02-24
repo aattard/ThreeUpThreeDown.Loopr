@@ -20,7 +20,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     private let startButton: UIButton = {
         let button = UIButton(type: .system)
         
-        // Bigger play icon to fill the circle
         let config = UIImage.SymbolConfiguration(pointSize: 90, weight: .bold)
         let image = UIImage(systemName: "play.circle.fill", withConfiguration: config)
         button.setImage(image, for: .normal)
@@ -28,7 +27,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         button.tintColor = .white
         button.backgroundColor = .black
         
-        // Thicker black border
         button.layer.borderWidth = 2
         button.layer.borderColor = UIColor.black.cgColor
         button.layer.cornerRadius = 60
@@ -60,9 +58,26 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         button.layer.cornerRadius = 25
         button.clipsToBounds = true
         button.translatesAutoresizingMaskIntoConstraints = false
-        // Resist stretching in the stack view
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return button
+    }()
+    
+    // Ultra-wide toggle button — only shown when hardware supports it
+    private let ultraWideButton: UIButton = {
+        let button = UIButton(type: .system)
+        let config = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
+        // Default icon: expand arrows = go to ultra-wide
+        let image = UIImage(systemName: "arrow.up.left.and.arrow.down.right", withConfiguration: config)
+        button.setImage(image, for: .normal)
+        button.tintColor = .white
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        button.layer.cornerRadius = 25
+        button.clipsToBounds = true
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.isHidden = true  // Hidden until we confirm hardware support
         return button
     }()
     
@@ -91,12 +106,10 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     private static func makePillButton(icon: String, title: String) -> UIButton {
         let button = UIButton(type: .system)
         
-        // Icon
         let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         let image = UIImage(systemName: icon, withConfiguration: iconConfig)
         button.setImage(image, for: .normal)
         
-        // Label
         button.setTitle(" \(title)", for: .normal)
         button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
         
@@ -104,9 +117,8 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         button.setTitleColor(.white, for: .normal)
         button.backgroundColor = UIColor.black.withAlphaComponent(0.6)
         
-        // Pill shape: same height as flip button, wider via padding
         button.contentEdgeInsets = UIEdgeInsets(top: 0, left: 16, bottom: 0, right: 16)
-        button.layer.cornerRadius = 25   // pill = height/2 (height is 50)
+        button.layer.cornerRadius = 25
         button.clipsToBounds = true
         button.translatesAutoresizingMaskIntoConstraints = false
         return button
@@ -127,10 +139,8 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     }()
     
     // ─────────────────────────────────────────────────────────────────────
-    // MARK: - Trial badge (shown during free trial period)
+    // MARK: - Trial badge
     // ─────────────────────────────────────────────────────────────────────
-    // Small non-intrusive label in the bottom-left showing days remaining.
-    // Tapping it opens the paywall so users can purchase early if they want.
     private let trialBadgeButton: UIButton = {
         let button = UIButton(type: .system)
         button.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .medium)
@@ -139,7 +149,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         button.layer.cornerRadius = 12
         button.contentEdgeInsets = UIEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.isHidden = true   // Hidden until we confirm trial status
+        button.isHidden = true
         return button
     }()
 
@@ -156,7 +166,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         UIApplication.shared.isIdleTimerDisabled = true
         setupUI()
 
-        // Just start the preview - permission check happens in viewDidAppear
         cameraPreviewView.startPreview(useFrontCamera: Settings.shared.useFrontCamera) { [weak self] in
             print("✅ Home camera preview fully ready")
             self?.onCameraPreviewReady?()
@@ -193,7 +202,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             }
 
         default:
-            // Previously denied — show alert immediately
             showCameraPermissionAlert()
         }
     }
@@ -222,7 +230,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         super.viewDidAppear(animated)
         updateTrialBadge()
 
-        // Safe to show alerts here - view is fully in the window hierarchy
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         if status == .denied || status == .restricted {
             showCameraPermissionAlert()
@@ -268,7 +275,9 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         view.addSubview(logoImageView)
         
         // Control buttons in stack view
+        // Order: flip | ultraWide (if available) | zoom | delay | buffer
         controlsStackView.addArrangedSubview(flipButton)
+        controlsStackView.addArrangedSubview(ultraWideButton)
         controlsStackView.addArrangedSubview(zoomButton)
         controlsStackView.addArrangedSubview(delayButton)
         controlsStackView.addArrangedSubview(bufferButton)
@@ -286,6 +295,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         // Button actions
         startButton.addTarget(self, action: #selector(startSessionTapped), for: .touchUpInside)
         flipButton.addTarget(self, action: #selector(flipCameraTapped), for: .touchUpInside)
+        ultraWideButton.addTarget(self, action: #selector(ultraWideButtonTapped), for: .touchUpInside)
         zoomButton.addTarget(self, action: #selector(zoomButtonTapped), for: .touchUpInside)
         delayButton.addTarget(self, action: #selector(delayButtonTapped), for: .touchUpInside)
         bufferButton.addTarget(self, action: #selector(bufferButtonTapped), for: .touchUpInside)
@@ -313,6 +323,10 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             flipButton.widthAnchor.constraint(equalToConstant: 50),
             flipButton.heightAnchor.constraint(equalToConstant: 50),
             
+            // Ultra-wide button same size as flip button
+            ultraWideButton.widthAnchor.constraint(equalToConstant: 50),
+            ultraWideButton.heightAnchor.constraint(equalToConstant: 50),
+            
             // Pill buttons: same height as flip button, width auto-sizes to content
             zoomButton.heightAnchor.constraint(equalToConstant: 50),
             delayButton.heightAnchor.constraint(equalToConstant: 50),
@@ -333,10 +347,84 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         updateDelayButton()
         updateZoomButton()
         updateBufferButton()
+        updateUltraWideButton()
         
         // Zoom callback
         cameraPreviewView.onZoomChanged = { [weak self] zoom in
             self?.updateZoomButton()
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // MARK: - Ultra-Wide Button Helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Updates the ultra-wide button icon to reflect active state (icon swap only, no background change).
+    private func updateUltraWideButtonIcon() {
+        let isActive = Settings.shared.useUltraWideCamera
+        let iconName = isActive
+            ? "arrow.down.right.and.arrow.up.left"   // currently ultra-wide: show collapse icon
+            : "arrow.up.left.and.arrow.down.right"   // currently standard: show expand icon
+        let config = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
+        ultraWideButton.setImage(UIImage(systemName: iconName, withConfiguration: config), for: .normal)
+    }
+
+    /// Shows or hides the ultra-wide button with a smooth grow/shrink spring animation.
+    private func updateUltraWideButton(animated: Bool = true) {
+        let isAvailable = LiveCameraPreviewView.ultraWideCameraAvailableForCurrentPosition()
+
+        // Always sync the icon
+        updateUltraWideButtonIcon()
+
+        let isCurrentlyVisible = !ultraWideButton.isHidden
+
+        if isAvailable && !isCurrentlyVisible {
+            // Make the button part of the layout BEFORE animating so the stack
+            // view sees it as present and smoothly pushes the other buttons apart.
+            ultraWideButton.isHidden = false
+            ultraWideButton.alpha = 0
+            ultraWideButton.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
+
+            if animated {
+                // Force an immediate layout pass so the stack registers the new size
+                self.view.layoutIfNeeded()
+
+                UIView.animate(withDuration: 0.38, delay: 0,
+                               usingSpringWithDamping: 0.68,
+                               initialSpringVelocity: 0.4,
+                               options: .curveEaseOut) {
+                    self.ultraWideButton.alpha = 1
+                    self.ultraWideButton.transform = .identity
+                    self.view.layoutIfNeeded()
+                }
+            } else {
+                ultraWideButton.alpha = 1
+                ultraWideButton.transform = .identity
+            }
+        } else if !isAvailable && isCurrentlyVisible {
+            if animated {
+                UIView.animate(withDuration: 0.28, delay: 0,
+                               usingSpringWithDamping: 0.85,
+                               initialSpringVelocity: 0.2,
+                               options: .curveEaseIn) {
+                    self.ultraWideButton.alpha = 0
+                    self.ultraWideButton.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
+                    self.view.layoutIfNeeded()
+                } completion: { _ in
+                    // Hide AFTER animation so the stack collapses smoothly in the
+                    // animation block above rather than snapping on completion.
+                    self.ultraWideButton.isHidden = true
+                    self.ultraWideButton.transform = .identity
+                    UIView.animate(withDuration: 0.22, delay: 0,
+                                   options: .curveEaseInOut) {
+                        self.view.layoutIfNeeded()
+                    }
+                }
+            } else {
+                ultraWideButton.isHidden = true
+                ultraWideButton.alpha = 0
+                ultraWideButton.transform = .identity
+            }
         }
     }
 
@@ -348,10 +436,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         guard !isSessionActive else { return }
         print("🎬 Start Session tapped")
 
-        // ── PAYWALL CHECK ──────────────────────────────────────────────
-        // If the user's trial has expired and they haven't purchased,
-        // show the paywall instead of starting the session.
-        // ──────────────────────────────────────────────────────────────
         if !PurchaseManager.shared.canStartSession() {
             showPaywall()
             return
@@ -360,21 +444,16 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         beginSession()
     }
 
-    /// Presents the paywall. When the user successfully purchases,
-    /// onUnlocked fires and we start the session automatically.
     private func showPaywall() {
         print("🔒 Showing paywall")
         let paywallVC = PaywallViewController()
         paywallVC.modalPresentationStyle = .fullScreen
         paywallVC.onUnlocked = { [weak self] in
-            // Purchase succeeded – go straight into the session
             self?.beginSession()
         }
         present(paywallVC, animated: true)
     }
 
-    /// The actual session-start logic, extracted so we can call it from
-    /// both the normal flow and post-purchase callback.
     private func beginSession() {
         isSessionActive = true
 
@@ -419,8 +498,9 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         delayedCameraView = nil
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.cameraPreviewView.isHidden = false
-            self?.cameraPreviewView.startPreview(useFrontCamera: Settings.shared.useFrontCamera)
+            guard let self else { return }
+            self.cameraPreviewView.isHidden = false
+            self.cameraPreviewView.startPreview(useFrontCamera: Settings.shared.useFrontCamera)
         }
         
         UIView.animate(withDuration: 0.3) {
@@ -435,7 +515,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // MARK: - Other Button Actions
+    // MARK: - Button Actions
     // ─────────────────────────────────────────────────────────────────────
     
     @objc private func flipCameraTapped() {
@@ -454,7 +534,27 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         cameraPreviewView.stopPreview { [weak self] in
             guard let self = self else { return }
             self.cameraPreviewView.startPreview(useFrontCamera: Settings.shared.useFrontCamera)
+            self.updateUltraWideButton()
+            self.updateZoomButton()
             print("✅ Switched to \(Settings.shared.useFrontCamera ? "front" : "back") camera")
+        }
+    }
+    
+    @objc private func ultraWideButtonTapped() {
+        print("🔭 Ultra-wide button tapped")
+
+        // Toggle the setting — Settings.shared handles zoom reset internally
+        Settings.shared.useUltraWideCamera.toggle()
+        let isNowUltraWide = Settings.shared.useUltraWideCamera
+        print("🔭 Ultra-wide now: \(isNowUltraWide ? "ON" : "OFF")")
+
+        // Restart preview with the new device
+        cameraPreviewView.stopPreview { [weak self] in
+            guard let self else { return }
+            self.cameraPreviewView.startPreview(useFrontCamera: Settings.shared.useFrontCamera) { [weak self] in
+                self?.updateZoomButton()
+            }
+            self.updateUltraWideButtonIcon()
         }
     }
     
@@ -506,7 +606,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             preferredStyle: .actionSheet
         )
         
-        // (seconds, isRecommended)
         let delays: [(Int, Bool)] = [(5, false), (7, true), (10, false), (12, false)]
         
         for (delay, recommended) in delays {
@@ -519,7 +618,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
                 action.setValue(true, forKey: "checked")
             }
             if recommended {
-                //let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
                 let starImage = UIImage(systemName: "star.fill")?.withTintColor(.white, renderingMode: .alwaysOriginal)
                 action.setValue(starImage, forKey: "image")
             }
@@ -549,7 +647,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         print("🏷 Trial badge tapped – showing paywall for early purchase")
         let paywallVC = PaywallViewController()
         paywallVC.modalPresentationStyle = .fullScreen
-        paywallVC.showCloseButton = true  // Allow dismissal – they're still in trial
+        paywallVC.showCloseButton = true
         paywallVC.onUnlocked = { [weak self] in
             self?.updateTrialBadge()
         }
@@ -596,7 +694,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             preferredStyle: .actionSheet
         )
         
-        // (minutes, isRecommended)
         let options: [(Int, Bool)] = [(1, true), (2, false), (3, false), (4, false), (5, false)]
         
         for (minutes, recommended) in options {
@@ -610,7 +707,6 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
                 action.setValue(true, forKey: "checked")
             }
             if recommended {
-                //let starImage = UIImage(systemName: "star.fill")?.withTintColor(.systemYellow, renderingMode: .alwaysOriginal)
                 let starImage = UIImage(systemName: "star.fill")?.withTintColor(.white, renderingMode: .alwaysOriginal)
                 action.setValue(starImage, forKey: "image")
             }

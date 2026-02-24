@@ -224,7 +224,7 @@ final class DelayedCameraView: UIView {
             yes.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -30),
             yes.heightAnchor.constraint(equalToConstant: 56),
 
-            prog.leadingAnchor.constraint(equalTo: yes.leadingAnchor), // Starts on the left
+            prog.leadingAnchor.constraint(equalTo: yes.leadingAnchor),
             prog.bottomAnchor.constraint(equalTo: yes.bottomAnchor),
             prog.heightAnchor.constraint(equalToConstant: 12),
 
@@ -303,9 +303,6 @@ final class DelayedCameraView: UIView {
         countdownStopButton.addTarget(self, action: #selector(countdownStopTapped), for: .touchUpInside)
         livePauseButton.addTarget(self, action: #selector(livePauseTapped), for: .touchUpInside)
 
-        //recordedView.onRestartRequested = { [weak self] in self?.restartCountdown() }
-        //recordedView.onStopSessionRequested = { [weak self] in self?.stopSession() }
-        
         recordedView.onRestartRequested = { [weak self] in
             self?.restartCountdown()
         }
@@ -319,29 +316,20 @@ final class DelayedCameraView: UIView {
 
             let splitVC = SplitVideoView(leftURL: leftURL, rightURL: rightURL)
 
-            // Back: just return to clipping UI in same state, temps intact.
             splitVC.onDismiss = { [weak self] in
                 guard let self else { return }
                 self.recordedView.restoreClipModeAfterSplit()
             }
 
-            // Restart: tell delayed camera to restart, THEN dismiss split view.
             splitVC.onRestartRequested = { [weak splitVC, weak self] in
                 guard let self else { return }
-
-                // Trigger your existing restart logic.
                 self.restartCountdown()
-
-                // Once restart UI is in place, dismiss split.
                 splitVC?.dismiss(animated: true, completion: nil)
             }
 
-            // End session: stop session, THEN dismiss split view.
             splitVC.onStopSessionRequested = { [weak splitVC, weak self] in
                 guard let self else { return }
-
                 self.stopSession()
-
                 splitVC?.dismiss(animated: true, completion: nil)
             }
 
@@ -438,11 +426,24 @@ final class DelayedCameraView: UIView {
             self.captureSession.beginConfiguration()
             self.captureSession.sessionPreset = .high
 
+            // Select wide-angle or ultra-wide based on setting
             let pos: AVCaptureDevice.Position = useFrontCamera ? .front : .back
-            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: pos) else {
+            let useUltraWide = Settings.shared.useUltraWideCamera
+            let deviceType: AVCaptureDevice.DeviceType = useUltraWide ? .builtInUltraWideCamera : .builtInWideAngleCamera
+
+            var camera = AVCaptureDevice.default(deviceType, for: .video, position: pos)
+
+            // Fallback to wide angle if ultra-wide requested but not available
+            if camera == nil && useUltraWide {
+                print("⚠️ Ultra-wide not available in DelayedCameraView, falling back to wide angle")
+                camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: pos)
+            }
+
+            guard let camera else {
                 self.captureSession.commitConfiguration()
                 return
             }
+
             self.currentDevice = camera
 
             let actualFPS = Settings.shared.currentFPS(isFrontCamera: useFrontCamera)
@@ -538,6 +539,102 @@ final class DelayedCameraView: UIView {
                 DispatchQueue.main.async { self.startCountdown() }
             }
         }
+    }
+
+    // MARK: - Restart
+
+    private func restartCountdown() {
+        hideActivityAlert()
+        activityCheckTimer?.invalidate()
+        activityCountdownTimer?.invalidate()
+        stopRecordingIndicator()
+        displayTimer?.invalidate()
+        displayTimer = nil
+
+        recordedView.resetUIAndTearDown()
+
+        UIView.animate(withDuration: 0.3) {
+            self.recordedView.alpha = 0
+        }
+
+        isPaused = false
+        isShowingDelayed = false
+        isActive = false
+
+        if let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel {
+            durationLabel.text = "00:00:00"
+        }
+
+        let savedDelay = delaySeconds
+        let savedFront = isFrontCamera
+
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.captureSession?.stopRunning()
+
+            let oldBuffer = self.videoFileBuffer
+            self.videoFileBuffer = nil
+            oldBuffer?.cleanup()
+
+            DispatchQueue.main.async {
+                self.previewLayer?.removeFromSuperlayer()
+                self.previewLayer = nil
+
+                if let session = self.captureSession {
+                    session.beginConfiguration()
+                    session.inputs.forEach { session.removeInput($0) }
+                    session.outputs.forEach { session.removeOutput($0) }
+                    session.commitConfiguration()
+                }
+                self.captureSession = nil
+                self.videoDataOutput = nil
+                self.currentDevice = nil
+                self.displayImageView.alpha = 0
+
+                self.isActive = true
+                self.isFrontCamera = savedFront
+                self.delaySeconds = savedDelay
+                self.isPaused = false
+
+                self.setupCamera(useFrontCamera: savedFront)
+            }
+        }
+    }
+
+    // MARK: - UI Helpers
+
+    private func showLivePauseButton() {
+        UIView.animate(withDuration: 0.3) { self.livePauseButton.alpha = 1 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self, !self.isPaused else { return }
+            self.hideLivePauseButton()
+        }
+    }
+
+    private func hideLivePauseButton() {
+        UIView.animate(withDuration: 0.3) { self.livePauseButton.alpha = 0 }
+    }
+
+    private func startRecordingIndicator() {
+        UIView.animate(withDuration: 0.3) { self.recordingIndicator.alpha = 1 }
+        if let dot = recordingIndicator.viewWithTag(999) {
+            let b = CABasicAnimation(keyPath: "opacity")
+            b.fromValue = 1.0; b.toValue = 0.0; b.duration = 0.8
+            b.repeatCount = .infinity; b.autoreverses = true
+            dot.layer.add(b, forKey: "blinking")
+        }
+    }
+
+    private func updateRecordingDuration() {
+        guard let lbl = recordingIndicator.viewWithTag(996) as? UILabel else { return }
+        let e = CACurrentMediaTime() - recordingStartTime
+        lbl.text = String(format: "%02d:%02d:%02d", Int(e) / 3600, (Int(e) % 3600) / 60, Int(e) % 60)
+    }
+
+    private func stopRecordingIndicator() {
+        recordingDurationTimer?.invalidate(); recordingDurationTimer = nil
+        recordingIndicator.viewWithTag(999)?.layer.removeAnimation(forKey: "blinking")
+        UIView.animate(withDuration: 0.3) { self.recordingIndicator.alpha = 0 }
     }
 
     // MARK: - Display
@@ -660,9 +757,6 @@ final class DelayedCameraView: UIView {
                 composition: composition,
                 delaySeconds: self.delaySeconds,
                 isFrontCamera: self.isFrontCamera,
-                //rotationAngleProvider: { [weak self] in
-                //    self?.previewLayer?.connection?.videoRotationAngle ?? 0
-                //},
                 recordedRotationAngle: self.previewLayer?.connection?.videoRotationAngle ?? 0,
                 initialScrubberIndex: initialScrubberIndex,
                 recordedSeconds: recordedSeconds,
@@ -674,99 +768,6 @@ final class DelayedCameraView: UIView {
                 self.displayImageView.alpha = 0
             }
         }
-    }
-
-    private func restartCountdown() {
-        hideActivityAlert()
-        activityCheckTimer?.invalidate()
-        activityCountdownTimer?.invalidate()
-        stopRecordingIndicator()
-        displayTimer?.invalidate()
-        displayTimer = nil
-
-        recordedView.resetUIAndTearDown()
-        UIView.animate(withDuration: 0.3) {
-            self.recordedView.alpha = 0
-        }
-
-        isPaused = false
-        isShowingDelayed = false
-        isActive = false
-
-        if let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel {
-            durationLabel.text = "00:00:00"
-        }
-
-        let savedDelay = delaySeconds
-        let savedFront = isFrontCamera
-
-        captureQueue.async { [weak self] in
-            guard let self else { return }
-            self.captureSession?.stopRunning()
-
-            let oldBuffer = self.videoFileBuffer
-            self.videoFileBuffer = nil
-            oldBuffer?.cleanup()
-
-            DispatchQueue.main.async {
-                self.previewLayer?.removeFromSuperlayer()
-                self.previewLayer = nil
-
-                if let session = self.captureSession {
-                    session.beginConfiguration()
-                    session.inputs.forEach { session.removeInput($0) }
-                    session.outputs.forEach { session.removeOutput($0) }
-                    session.commitConfiguration()
-                }
-                self.captureSession = nil
-                self.videoDataOutput = nil
-                self.currentDevice = nil
-                self.displayImageView.alpha = 0
-
-                self.isActive = true
-                self.isFrontCamera = savedFront
-                self.delaySeconds = savedDelay
-                self.isPaused = false
-
-                self.setupCamera(useFrontCamera: savedFront)
-            }
-        }
-    }
-
-    // MARK: - UI Helpers
-
-    private func showLivePauseButton() {
-        UIView.animate(withDuration: 0.3) { self.livePauseButton.alpha = 1 }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self, !self.isPaused else { return }
-            self.hideLivePauseButton()
-        }
-    }
-
-    private func hideLivePauseButton() {
-        UIView.animate(withDuration: 0.3) { self.livePauseButton.alpha = 0 }
-    }
-
-    private func startRecordingIndicator() {
-        UIView.animate(withDuration: 0.3) { self.recordingIndicator.alpha = 1 }
-        if let dot = recordingIndicator.viewWithTag(999) {
-            let b = CABasicAnimation(keyPath: "opacity")
-            b.fromValue = 1.0; b.toValue = 0.0; b.duration = 0.8
-            b.repeatCount = .infinity; b.autoreverses = true
-            dot.layer.add(b, forKey: "blinking")
-        }
-    }
-
-    private func updateRecordingDuration() {
-        guard let lbl = recordingIndicator.viewWithTag(996) as? UILabel else { return }
-        let e = CACurrentMediaTime() - recordingStartTime
-        lbl.text = String(format: "%02d:%02d:%02d", Int(e) / 3600, (Int(e) % 3600) / 60, Int(e) % 60)
-    }
-
-    private func stopRecordingIndicator() {
-        recordingDurationTimer?.invalidate(); recordingDurationTimer = nil
-        recordingIndicator.viewWithTag(999)?.layer.removeAnimation(forKey: "blinking")
-        UIView.animate(withDuration: 0.3) { self.recordingIndicator.alpha = 0 }
     }
 
     // MARK: - Activity check
@@ -813,7 +814,7 @@ final class DelayedCameraView: UIView {
         guard let btn = activityAlertContainer.viewWithTag(1001),
               let prog = btn.viewWithTag(1002) else { return }
 
-        let fraction = 1.0 - (CGFloat(activityTimeRemaining) / 60.0) // Fills up as time drops
+        let fraction = 1.0 - (CGFloat(activityTimeRemaining) / 60.0)
         let newWidth = btn.bounds.width * fraction
 
         if activityProgressConstraint == nil {
@@ -905,4 +906,3 @@ extension DelayedCameraView: AVCaptureVideoDataOutputSampleBufferDelegate {
                        didDrop sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {}
 }
-

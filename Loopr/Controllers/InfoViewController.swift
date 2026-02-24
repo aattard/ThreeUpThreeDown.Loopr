@@ -18,6 +18,11 @@ class InfoViewController: UIViewController {
             detail: "Switch between front and back cameras to get the perfect angle on your athlete."
         ),
         HowToCard(
+            icon: "arrow.up.left.and.arrow.down.right",
+            action: "Wide View",
+            detail: "Option displayed on supported devices. TAP the wide view button to switch to the ultra-wide camera — great for batting cages or tight spaces where you can't back up far enough. TAP again to return to standard view. Available on the rear camera for most iPhones and on the front camera for newer iPads."
+        ),
+        HowToCard(
             icon: "magnifyingglass",
             action: "Zoom",
             detail: "TAP the zoom button to set a level (1.0x – 5.0x), or PINCH directly on the screen for smooth on-the-fly control."

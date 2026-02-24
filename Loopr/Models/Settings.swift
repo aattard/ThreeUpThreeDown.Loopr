@@ -14,25 +14,23 @@ class Settings {
     private let keyFrontCameraZoom = "frontCameraZoom"
     private let keyBackCameraFPS = "backCameraFPS"
     private let keyFrontCameraFPS = "frontCameraFPS"
+    private let keyFrontCameraUltraWide = "frontCameraUltraWide"
+    private let keyBackCameraUltraWide = "backCameraUltraWide"
     
     var playbackDelay: Int {
         get {
             let value = defaults.integer(forKey: keyPlaybackDelay)
-            return value == 0 ? 7 : value // Default 7 seconds
+            return value == 0 ? 7 : value
         }
-        set {
-            defaults.set(newValue, forKey: keyPlaybackDelay)
-        }
+        set { defaults.set(newValue, forKey: keyPlaybackDelay) }
     }
     
     var bufferDuration: Int {
         get {
             let value = defaults.integer(forKey: keyBufferDuration)
-            return value == 0 ? 45 : value // Default 45 seconds
+            return value == 0 ? 45 : value
         }
-        set {
-            defaults.set(newValue, forKey: keyBufferDuration)
-        }
+        set { defaults.set(newValue, forKey: keyBufferDuration) }
     }
     
     /// Buffer duration in seconds (user selects 1–5 minutes; stored as seconds).
@@ -42,17 +40,44 @@ class Settings {
             let value = defaults.integer(forKey: keyBufferDurationSeconds)
             return value == 0 ? 60 : value
         }
-        set {
-            defaults.set(newValue, forKey: keyBufferDurationSeconds)
-        }
+        set { defaults.set(newValue, forKey: keyBufferDurationSeconds) }
     }
 
     var useFrontCamera: Bool {
-        get {
-            return defaults.bool(forKey: keyCameraSelection)
-        }
+        get { return defaults.bool(forKey: keyCameraSelection) }
+        set { defaults.set(newValue, forKey: keyCameraSelection) }
+    }
+
+    /// Whether to use the ultra-wide camera for the front-facing position.
+    /// Stored independently so switching cameras preserves each position's last selection.
+    /// Resets zoom to 1.0 when toggled.
+    var frontCameraUltraWide: Bool {
+        get { return defaults.bool(forKey: keyFrontCameraUltraWide) }
         set {
-            defaults.set(newValue, forKey: keyCameraSelection)
+            defaults.set(newValue, forKey: keyFrontCameraUltraWide)
+            frontCameraZoom = 1.0
+        }
+    }
+
+    /// Whether to use the ultra-wide camera for the rear-facing position.
+    /// Resets zoom to 1.0 when toggled.
+    var backCameraUltraWide: Bool {
+        get { return defaults.bool(forKey: keyBackCameraUltraWide) }
+        set {
+            defaults.set(newValue, forKey: keyBackCameraUltraWide)
+            backCameraZoom = 1.0
+        }
+    }
+
+    /// Convenience accessor for the ultra-wide state of the currently active camera position.
+    var useUltraWideCamera: Bool {
+        get { return useFrontCamera ? frontCameraUltraWide : backCameraUltraWide }
+        set {
+            if useFrontCamera {
+                frontCameraUltraWide = newValue
+            } else {
+                backCameraUltraWide = newValue
+            }
         }
     }
     
@@ -61,9 +86,7 @@ class Settings {
             let value = defaults.double(forKey: keyBackCameraZoom)
             return value == 0 ? 1.0 : CGFloat(value)
         }
-        set {
-            defaults.set(Double(newValue), forKey: keyBackCameraZoom)
-        }
+        set { defaults.set(Double(newValue), forKey: keyBackCameraZoom) }
     }
 
     var frontCameraZoom: CGFloat {
@@ -71,57 +94,33 @@ class Settings {
             let value = defaults.double(forKey: keyFrontCameraZoom)
             return value == 0 ? 1.0 : CGFloat(value)
         }
-        set {
-            defaults.set(Double(newValue), forKey: keyFrontCameraZoom)
-        }
+        set { defaults.set(Double(newValue), forKey: keyFrontCameraZoom) }
     }
     
     var backCameraFPS: Int {
-        get {
-            // Always return 30fps - the only supported frame rate
-            return 30
-        }
-        set {
-            // Accept but always store 30fps
-            defaults.set(30, forKey: keyBackCameraFPS)
-        }
+        get { return 30 }
+        set { defaults.set(30, forKey: keyBackCameraFPS) }
     }
     
     var frontCameraFPS: Int {
-        get {
-            // Always return 30fps - the only supported frame rate
-            return 30
-        }
-        set {
-            // Accept but always store 30fps
-            defaults.set(30, forKey: keyFrontCameraFPS)
-        }
+        get { return 30 }
+        set { defaults.set(30, forKey: keyFrontCameraFPS) }
     }
 
-    // Helper to get the right zoom for current camera
     func currentZoomFactor(isFrontCamera: Bool) -> CGFloat {
         return isFrontCamera ? frontCameraZoom : backCameraZoom
     }
     
     func setZoomFactor(_ zoom: CGFloat, isFrontCamera: Bool) {
-        if isFrontCamera {
-            frontCameraZoom = zoom
-        } else {
-            backCameraZoom = zoom
-        }
+        if isFrontCamera { frontCameraZoom = zoom } else { backCameraZoom = zoom }
     }
     
-    // Helper to get the right FPS for current camera
     func currentFPS(isFrontCamera: Bool) -> Int {
         return isFrontCamera ? frontCameraFPS : backCameraFPS
     }
     
     func setFPS(_ fps: Int, isFrontCamera: Bool) {
-        if isFrontCamera {
-            frontCameraFPS = fps
-        } else {
-            backCameraFPS = fps
-        }
+        if isFrontCamera { frontCameraFPS = fps } else { backCameraFPS = fps }
     }
     
     private init() {}
