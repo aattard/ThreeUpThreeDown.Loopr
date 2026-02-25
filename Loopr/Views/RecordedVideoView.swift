@@ -2,6 +2,170 @@ import UIKit
 import AVFoundation
 import Photos
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK: - MotionWaveformLayer
+//
+// A CALayer subclass that renders a motion-intensity waveform as a smooth
+// filled bezier path — looks great at any recording duration, short or long.
+//
+// Tuning constants live here — change colour, sample count, or contrast here.
+// ─────────────────────────────────────────────────────────────────────────────
+final class MotionWaveformLayer: CALayer {
+
+    // ── Appearance constants ──────────────────────────────────────────────────
+
+    /// Number of sample points used to build the bezier curve.
+    static let sampleCount: Int = 200
+
+    /// Fill colour of the waveform.
+    static let waveformColor: UIColor = UIColor(red: 0/255, green: 115/255, blue: 186/255, alpha: 0.95)
+
+    /// Minimum half-height in points so still moments show a faint hairline.
+    static let minHalfHeight: CGFloat = 0.5
+
+    /// Maximum half-height as a fraction of the available half-height (0–1).
+    static let maxHeightFraction: CGFloat = 0.85
+
+    /// Power curve exponent. 1.0 = linear. Increase toward 1.5 for more contrast.
+    static let contrastPower: Double = 1.0
+
+    // ── Data ─────────────────────────────────────────────────────────────────
+
+    /// Raw motion scores for the *displayable* window, in time order.
+    /// Assign on the main thread; the layer redraws automatically.
+    var scores: [Float] = [] {
+        didSet { setNeedsDisplay() }
+    }
+
+    // ── Drawing ──────────────────────────────────────────────────────────────
+
+    override func draw(in ctx: CGContext) {
+        guard !scores.isEmpty, bounds.width > 0, bounds.height > 0 else { return }
+
+        let n     = Self.sampleCount
+        let w     = bounds.width
+        let h     = bounds.height
+        let midY  = h / 2.0
+        let count = scores.count
+
+        // ── Sort once for percentile calculations ─────────────────────────────
+        let sorted   = scores.sorted()
+        let minScore = sorted.first ?? 0
+        let maxScore = sorted.last  ?? 1
+        let avgScore = scores.reduce(0, +) / Float(scores.count)
+        let p25 = sorted[max(0, scores.count / 4)]
+        let p50 = sorted[max(0, scores.count / 2)]
+        let p75 = sorted[max(0, scores.count * 3 / 4)]
+        let p90 = sorted[max(0, Int(Double(scores.count) * 0.90))]
+        let p99 = sorted[max(0, min(Int(Double(scores.count) * 0.99), scores.count - 1))]
+
+        // 🔍 DEBUG — remove once waveform looks correct
+        print("🌊 Waveform — count:\(scores.count) min:\(String(format:"%.4f",minScore)) p25:\(String(format:"%.4f",p25)) p50:\(String(format:"%.4f",p50)) avg:\(String(format:"%.4f",avgScore)) p75:\(String(format:"%.4f",p75)) p90:\(String(format:"%.4f",p90)) p99:\(String(format:"%.4f",p99)) max:\(String(format:"%.4f",maxScore))")
+        let top20 = sorted.suffix(20).reversed().map { String(format:"%.4f",$0) }.joined(separator:" ")
+        print("🌊 Top 20: \(top20)")
+
+        // ── Percentile-based normalisation ───────────────────────────────────
+        // p50 as noise floor collapses ambient camera noise to zero.
+        // p99 as ceiling prevents one outlier frame squashing everything else.
+        let noiseFloor = p50
+        let ceiling    = max(p99, noiseFloor + 0.001)
+        let norm       = ceiling - noiseFloor
+        let maxH       = midY * Self.maxHeightFraction
+
+        // ── Build one normalised height value per sample point ───────────────
+        var heights = [CGFloat](repeating: 0, count: n)
+        for i in 0 ..< n {
+            let startFrac = Double(i)     / Double(n)
+            let endFrac   = Double(i + 1) / Double(n)
+            let startIdx  = Int(startFrac * Double(count))
+            let endIdx    = min(Int(endFrac * Double(count)), count)
+
+            if endIdx > startIdx {
+                var sum: Float = 0
+                for j in startIdx ..< endIdx { sum += scores[j] }
+                let avg    = sum / Float(endIdx - startIdx)
+                let lifted = max(avg - noiseFloor, 0)
+                let curved = pow(Double(lifted / norm), Self.contrastPower)
+                heights[i] = max(CGFloat(curved) * maxH, Self.minHalfHeight)
+            } else {
+                let prev   = i > 0 ? heights[i - 1] : Self.minHalfHeight
+                heights[i] = max(prev, Self.minHalfHeight)
+            }
+        }
+
+        // ── Peak-preserving smooth ────────────────────────────────────────────
+        // Max-pool so swing spikes survive, then one gentle average pass.
+        let peakRadius = 2
+        var peaked = [CGFloat](repeating: 0, count: n)
+        for i in 0 ..< n {
+            let lo = max(0, i - peakRadius)
+            let hi = min(n - 1, i + peakRadius)
+            var mx: CGFloat = 0
+            for j in lo ... hi { mx = max(mx, heights[j]) }
+            peaked[i] = mx
+        }
+        var smoothed = [CGFloat](repeating: 0, count: n)
+        for i in 0 ..< n {
+            let lo = max(0, i - 1)
+            let hi = min(n - 1, i + 1)
+            var sum: CGFloat = 0
+            for j in lo ... hi { sum += peaked[j] }
+            smoothed[i] = sum / CGFloat(hi - lo + 1)
+        }
+        for i in 0 ..< n { heights[i] = smoothed[i] }
+
+        // ── Build the filled bezier path ──────────────────────────────────────
+        // Walk left→right along the TOP with cubic bezier curves, mirror back
+        // along the BOTTOM, close to form a filled symmetric shape.
+        let path = CGMutablePath()
+
+        func xAt(_ i: Int) -> CGFloat { CGFloat(i) / CGFloat(n - 1) * w }
+
+        path.move(to: CGPoint(x: 0, y: midY))
+
+        // Top edge (left → right)
+        for i in 0 ..< n {
+            let x = xAt(i)
+            let y = midY - heights[i]
+            if i == 0 {
+                path.addLine(to: CGPoint(x: x, y: y))
+            } else {
+                let prevX = xAt(i - 1)
+                let prevY = midY - heights[i - 1]
+                let cpX   = (prevX + x) / 2.0
+                path.addCurve(to:      CGPoint(x: x,   y: y),
+                              control1: CGPoint(x: cpX, y: prevY),
+                              control2: CGPoint(x: cpX, y: y))
+            }
+        }
+
+        // Right midline cap
+        path.addLine(to: CGPoint(x: w, y: midY))
+
+        // Bottom edge (right → left, mirrored)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            let x = xAt(i)
+            let y = midY + heights[i]
+            if i == n - 1 {
+                path.addLine(to: CGPoint(x: x, y: y))
+            } else {
+                let nextX = xAt(i + 1)
+                let nextY = midY + heights[i + 1]
+                let cpX   = (nextX + x) / 2.0
+                path.addCurve(to:      CGPoint(x: x,    y: y),
+                              control1: CGPoint(x: cpX, y: nextY),
+                              control2: CGPoint(x: cpX, y: y))
+            }
+        }
+
+        path.closeSubpath()
+
+        ctx.setFillColor(Self.waveformColor.cgColor)
+        ctx.addPath(path)
+        ctx.fillPath()
+    }
+}
+
 final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Dependencies (injected)
@@ -117,11 +281,15 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     private let scrubberBackground: UIView = {
         let v = UIView()
-        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1)
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.65)
         v.layer.cornerRadius = 6
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
     }()
+
+    /// Motion waveform rendered over the scrubber bar.
+    /// Populated in presentPausedRecording; lives as a sublayer of scrubberBackground.
+    private let waveformLayer = MotionWaveformLayer()
 
     private let scrubberPlayhead: UIView = {
         let v = UIView()
@@ -150,7 +318,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     private let leftDimView: UIView = {
         let v = UIView()
-        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.5)
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.65)
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.layer.cornerRadius = 6
@@ -160,7 +328,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     private let rightDimView: UIView = {
         let v = UIView()
-        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.5)
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.65)
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.layer.cornerRadius = 6
@@ -170,7 +338,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
     private let clipRegionBackground: UIView = {
         let v = UIView()
-        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 1)
+        //v.backgroundColor = .clear
+        v.backgroundColor = UIColor(red: 96/255, green: 73/255, blue: 157/255, alpha: 0.35)
         v.layer.cornerRadius = 6
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
@@ -420,6 +589,8 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
     private var rightHandleConstraint: NSLayoutConstraint?
     private var playheadConstraint: NSLayoutConstraint?
     private var playheadWidthConstraint: NSLayoutConstraint?
+    private var scrubberBackgroundLeadingConstraint: NSLayoutConstraint?
+    private var scrubberBackgroundTrailingConstraint: NSLayoutConstraint?
     private var clipBackgroundLeadingConstraint: NSLayoutConstraint?
     private var clipBackgroundTrailingConstraint: NSLayoutConstraint?
     private var scrubberPlayheadConstraint: NSLayoutConstraint?
@@ -476,6 +647,11 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         // Force the timeline to figure out its new width FIRST, so bounds.width is accurate.
         timelineContainer.layoutIfNeeded()
+
+        // Update waveform AFTER layout resolves so scrubberBackground.frame reflects
+        // the current orientation and inset.
+        waveformLayer.frame = scrubberBackground.frame
+        waveformLayer.setNeedsDisplay()
 
         // Update split icon on rotations / size changes.
         updateSplitIconForCurrentOrientation()
@@ -544,11 +720,51 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         updateScrubberPlayheadPosition()
         updateTimeLabel()
         setupFrameDial()
+        updateWaveform()     // ← populate motion waveform over scrubber bar
 
         // Re-apply zoom transform after layout settles
         DispatchQueue.main.async {
             self.updateTransform()
         }
+    }
+
+    // MARK: - Motion waveform
+
+    /// Slices the motion scores from VideoFileBuffer to the displayable scrubber
+    /// window and hands them to the waveform layer for rendering.
+    /// Call once at pause time (inside presentPausedRecording) — the layer redraws itself.
+    private func updateWaveform() {
+        guard let buf = videoFileBuffer else { return }
+
+        let fps           = max(Settings.shared.currentFPS(isFrontCamera: isFrontCamera), 1)
+        let totalFrames   = buf.getCurrentFrameCount()
+        let requiredFrames = delaySeconds * fps
+        let pausePoint    = max(0, totalFrames - requiredFrames)
+        let oldest        = oldestAllowedIndex(totalFrames: totalFrames,
+                                               pausePoint: pausePoint,
+                                               fps: fps)
+
+        let allScores  = buf.getMotionScores()
+        // allScores is aligned with frameTimestamps; prunedFrameCount frames have
+        // been dropped from the front, so index (oldest) maps to array position
+        // (oldest - prunedFrameCount).  We can derive the offset from the array count
+        // vs the global frame count.
+        let prunedCount = totalFrames - allScores.count   // frames dropped from the front
+        let arrayStart  = max(0, oldest - prunedCount)
+        let arrayEnd    = max(arrayStart, min(pausePoint - prunedCount, allScores.count))
+
+        guard arrayEnd > arrayStart else {
+            waveformLayer.scores = []
+            return
+        }
+
+        waveformLayer.scores = Array(allScores[arrayStart ..< arrayEnd])
+
+        // Make sure the layer covers the bar (layout may not have run yet at this point)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        waveformLayer.frame = scrubberBackground.frame
+        CATransaction.commit()
     }
 
     private func setupFrameDial() {
@@ -648,6 +864,13 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
 
         // Timeline subviews
         timelineContainer.addSubview(scrubberBackground)
+        // Waveform sits directly over the scrubber bar as a sublayer of timelineContainer
+        // so it remains visible when scrubberBackground fades out in clip mode.
+        // It is inserted above scrubberBackground but below playheads and handles.
+        waveformLayer.contentsScale = UIScreen.main.scale
+        waveformLayer.masksToBounds = true
+        waveformLayer.cornerRadius  = 6
+        timelineContainer.layer.addSublayer(waveformLayer)
         timelineContainer.addSubview(scrubberPlayhead)
         scrubberPlayhead.addSubview(scrubberPlayheadKnob)
         timelineContainer.addSubview(scrubberTouchArea)
@@ -770,8 +993,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             frameDial.heightAnchor.constraint(equalToConstant: 28),
             frameDial.bottomAnchor.constraint(equalTo: controlsContainer.bottomAnchor, constant: -10),
 
-            scrubberBackground.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
-            scrubberBackground.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
             scrubberBackground.topAnchor.constraint(equalTo: timelineContainer.topAnchor),
             scrubberBackground.bottomAnchor.constraint(equalTo: timelineContainer.bottomAnchor),
 
@@ -846,6 +1067,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         clipBackgroundTrailingConstraint = clipRegionBackground.trailingAnchor.constraint(equalTo: rightTrimHandle.leadingAnchor)
         scrubberPlayheadConstraint = scrubberPlayhead.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor)
         scrubberTouchAreaConstraint = scrubberTouchArea.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor, constant: -22)
+        // Start full-width in scrub mode; inset by handleWidth when clip mode activates
+        scrubberBackgroundLeadingConstraint  = scrubberBackground.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor)
+        scrubberBackgroundTrailingConstraint = scrubberBackground.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor)
 
         [
             leftHandleConstraint,
@@ -855,7 +1079,9 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             clipBackgroundLeadingConstraint,
             clipBackgroundTrailingConstraint,
             scrubberPlayheadConstraint,
-            scrubberTouchAreaConstraint
+            scrubberTouchAreaConstraint,
+            scrubberBackgroundLeadingConstraint,
+            scrubberBackgroundTrailingConstraint
         ].forEach { $0?.isActive = true }
 
         // Initial UI state
@@ -1436,10 +1662,16 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         timelineContainer.bringSubviewToFront(clipPlayhead)
         timelineContainer.bringSubviewToFront(leftTrimHandle)
         timelineContainer.bringSubviewToFront(rightTrimHandle)
+        // Waveform is a CALayer — UIView-backed layers always render above bare CALayers,
+        // so handles and playheads naturally stay on top. No extra z-order work needed.
 
         UIView.animate(withDuration: 0.3) {
             self.scrubberBackground.alpha = 0
             self.scrubberPlayhead.alpha = 0
+
+            self.scrubberBackgroundLeadingConstraint?.constant  =  self.handleWidth
+            self.scrubberBackgroundTrailingConstraint?.constant = -self.handleWidth
+            self.timelineContainer.layoutIfNeeded()
 
             self.clipRegionBackground.isHidden = false
             self.leftDimView.isHidden = false
@@ -1505,6 +1737,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             self.scrubberBackground.alpha = 0
             self.scrubberPlayhead.alpha = 0
 
+            self.scrubberBackgroundLeadingConstraint?.constant  =  self.handleWidth
+            self.scrubberBackgroundTrailingConstraint?.constant = -self.handleWidth
+            self.timelineContainer.layoutIfNeeded()
+
             self.clipRegionBackground.isHidden = false
             self.leftDimView.isHidden = false
             self.rightDimView.isHidden = false
@@ -1560,6 +1796,11 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             self.scrubberBackground.alpha = 1
             self.scrubberPlayhead.alpha = 1
 
+            // Restore full width — no handles in scrub mode
+            self.scrubberBackgroundLeadingConstraint?.constant  = 0
+            self.scrubberBackgroundTrailingConstraint?.constant = 0
+            self.timelineContainer.layoutIfNeeded()
+
             self.clipRegionBackground.isHidden = true
             self.leftDimView.isHidden = true
             self.rightDimView.isHidden = true
@@ -1584,10 +1825,10 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let safeWidth = timelineContainer.bounds.width - (handleWidth * 2)
         guard safeWidth > 0 else { return }
 
-        let leftFrac = CGFloat(clipStartIndex - oldest) / CGFloat(range)
-        let rightFrac = CGFloat(clipEndIndex - oldest) / CGFloat(range)
+        let leftFrac  = CGFloat(clipStartIndex - oldest) / CGFloat(range)
+        let rightFrac = CGFloat(clipEndIndex   - oldest) / CGFloat(range)
 
-        let leftX = leftFrac * safeWidth
+        let leftX  = leftFrac  * safeWidth
         let rightX = (1.0 - rightFrac) * safeWidth
 
         leftHandleConstraint?.constant = leftX

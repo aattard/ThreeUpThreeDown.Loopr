@@ -80,6 +80,12 @@ class VideoFileBuffer {
     private let maxTimestampCount: Int
     private var prunedFrameCount: Int = 0
 
+    // MARK: - Private state — motion scores
+    // One Float per frame, kept in lockstep with frameTimestamps.
+    // Values are raw mean-absolute-difference scores (0–1 range before normalisation).
+    private var motionScores: [Float] = []
+    private var prevFramePixelBuffer: CVPixelBuffer?
+
     // MARK: - Private state — live-delay cache
 
     private var recentFramesCache: [UIImage] = []
@@ -164,6 +170,8 @@ class VideoFileBuffer {
         if isInitialStart {
             timestampLock.lock()
             frameTimestamps.removeAll()
+            motionScores.removeAll()
+            prevFramePixelBuffer = nil
             timestampLock.unlock()
 
             cacheLock.lock()
@@ -244,10 +252,17 @@ class VideoFileBuffer {
             globalFrameCount += 1
             lastAppendedTime  = presentationTime
 
+            // Compute motion score before updating prevFramePixelBuffer
+            let score = computeMotionScore(current: pixelBuffer, previous: prevFramePixelBuffer)
+            // Retain a reference to this frame for the next diff
+            prevFramePixelBuffer = pixelBuffer
+
             timestampLock.lock()
             frameTimestamps.append(presentationTime)
+            motionScores.append(score)
             if frameTimestamps.count > maxTimestampCount {
                 frameTimestamps.removeFirst()
+                motionScores.removeFirst()
                 prunedFrameCount += 1
             }
             timestampLock.unlock()
@@ -373,6 +388,12 @@ class VideoFileBuffer {
         }
         if lo > 0 {
             frameTimestamps.removeFirst(lo)
+            // Keep motionScores in lockstep — same count, same indices
+            if lo <= motionScores.count {
+                motionScores.removeFirst(lo)
+            } else {
+                motionScores.removeAll()
+            }
             prunedFrameCount += lo
         }
     }
@@ -391,8 +412,8 @@ class VideoFileBuffer {
         }
 
         let minimumFrames = fps * 1
-        guard frameCount >= minimumFrames else {
-            print("⚠️ pauseRecording: only \(frameCount) frames, need \(minimumFrames)")
+        guard globalFrameCount >= minimumFrames else {
+            print("⚠️ pauseRecording: only \(globalFrameCount) frames, need \(minimumFrames)")
             DispatchQueue.main.async { completion(nil, nil) }
             return
         }
@@ -615,6 +636,8 @@ class VideoFileBuffer {
 
         timestampLock.lock()
         frameTimestamps.removeAll()
+        motionScores.removeAll()
+        prevFramePixelBuffer = nil
         timestampLock.unlock()
 
         cacheLock.lock()
@@ -642,6 +665,96 @@ class VideoFileBuffer {
         currentFileIndex           = 0
     }
 
+    // MARK: - Motion score computation
+
+    /// Computes a normalised mean-absolute-difference score between two pixel buffers.
+    /// Works on luma only at a tiny thumbnail resolution (64×36) so it is very fast
+    /// (~0.5 ms on a modern A-series chip) and safe to call on the capture queue every frame.
+    ///
+    /// Returns 0 if there is no previous frame (first frame), or if locking either buffer fails.
+    private func computeMotionScore(current: CVPixelBuffer, previous: CVPixelBuffer?) -> Float {
+        guard let previous else { return 0.0 }
+
+        // ── Thumbnail dimensions ──────────────────────────────────────────────────
+        let thumbWidth  = 64
+        let thumbHeight = 36
+
+        // ── Helper: create a tiny CIImage from a pixel buffer ────────────────────
+        func thumbnail(from pb: CVPixelBuffer) -> CIImage {
+            CIImage(cvPixelBuffer: pb)
+                .transformed(by: CGAffineTransform(
+                    scaleX: CGFloat(thumbWidth)  / CGFloat(CVPixelBufferGetWidth(pb)),
+                    y:      CGFloat(thumbHeight) / CGFloat(CVPixelBufferGetHeight(pb))))
+        }
+
+        let ciCurrent  = thumbnail(from: current)
+        let ciPrevious = thumbnail(from: previous)
+
+        // ── Render both thumbnails to raw BGRA bytes ─────────────────────────────
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bpc = 8, bpr = thumbWidth * 4
+        guard
+            let cgCurrent  = ciContext.createCGImage(ciCurrent,  from: ciCurrent.extent),
+            let cgPrevious = ciContext.createCGImage(ciPrevious, from: ciPrevious.extent),
+            let ctxCurrent  = CGContext(data: nil, width: thumbWidth, height: thumbHeight,
+                                        bitsPerComponent: bpc, bytesPerRow: bpr,
+                                        space: colorSpace,
+                                        bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue),
+            let ctxPrevious = CGContext(data: nil, width: thumbWidth, height: thumbHeight,
+                                        bitsPerComponent: bpc, bytesPerRow: bpr,
+                                        space: colorSpace,
+                                        bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue)
+        else { return 0.0 }
+
+        let rect = CGRect(x: 0, y: 0, width: thumbWidth, height: thumbHeight)
+        ctxCurrent.draw(cgCurrent,   in: rect)
+        ctxPrevious.draw(cgPrevious, in: rect)
+
+        guard
+            let dataCurrent  = ctxCurrent.data,
+            let dataPrevious = ctxPrevious.data
+        else { return 0.0 }
+
+        // ── Sum absolute differences on luma (BT.601 from BGRA) ──────────────────
+        // BGRA layout: byte 0=B, 1=G, 2=R, 3=A (skip A)
+        let pixelCount = thumbWidth * thumbHeight
+        var totalDiff: Float = 0.0
+
+        let pCurrent  = dataCurrent.assumingMemoryBound(to: UInt8.self)
+        let pPrevious = dataPrevious.assumingMemoryBound(to: UInt8.self)
+
+        for i in 0 ..< pixelCount {
+            let base = i * 4
+            // Luma ≈ 0.299·R + 0.587·G + 0.114·B
+            let lumaCurrent  = 0.299 * Float(pCurrent[base + 2])
+                             + 0.587 * Float(pCurrent[base + 1])
+                             + 0.114 * Float(pCurrent[base])
+            let lumaPrevious = 0.299 * Float(pPrevious[base + 2])
+                             + 0.587 * Float(pPrevious[base + 1])
+                             + 0.114 * Float(pPrevious[base])
+            totalDiff += abs(lumaCurrent - lumaPrevious)
+        }
+
+        // Normalise: max possible diff per pixel is 255, so divide by (pixelCount * 255).
+        // Then apply a sensitivity multiplier to amplify the naturally small frame-to-frame
+        // differences at 30fps — empirically scores land in the 0.000–0.010 range without
+        // this, which compresses the waveform. A multiplier of 50 spreads them to 0.0–0.5+
+        // giving the power curve in the waveform renderer much more to work with.
+        // Clamp to 1.0 so the value stays a valid normalised score.
+        let sensitivityMultiplier: Float = 50.0
+        let raw = totalDiff / (Float(pixelCount) * 255.0)
+        return min(raw * sensitivityMultiplier, 1.0)
+    }
+
+    // MARK: - Motion score accessor
+
+    /// Returns a copy of the motion scores array, aligned 1:1 with frameTimestamps.
+    /// Safe to call from any thread.
+    func getMotionScores() -> [Float] {
+        timestampLock.lock()
+        defer { timestampLock.unlock() }
+        return motionScores
+    }
+
     deinit { cleanup() }
 }
-

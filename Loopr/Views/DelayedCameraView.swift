@@ -23,6 +23,14 @@ final class DelayedCameraView: UIView {
     private var isActive: Bool = false
     private var isShowingDelayed: Bool = false
     private var isPaused: Bool = false
+    /// Incremented on every new session start. Warmup closures capture their
+    /// generation at creation time and bail out if it no longer matches,
+    /// preventing a stale timer from firing after a restart.
+    private var warmupGeneration: Int = 0
+    /// True only after the 1-second camera warmup has elapsed.
+    /// Frames arriving before this are suppressed so the black fade-in
+    /// doesn't pollute the buffer or motion scores.
+    private var isCameraWarmedUp: Bool = false
 
     // MARK: - Recording indicator
 
@@ -61,6 +69,7 @@ final class DelayedCameraView: UIView {
         l.layer.cornerRadius = 20
         l.clipsToBounds = true
         l.translatesAutoresizingMaskIntoConstraints = false
+        l.alpha = 0
         return l
     }()
 
@@ -75,6 +84,7 @@ final class DelayedCameraView: UIView {
         b.layer.cornerRadius = 60
         b.clipsToBounds = true
         b.translatesAutoresizingMaskIntoConstraints = false
+        b.alpha = 0
         return b
     }()
 
@@ -379,6 +389,14 @@ final class DelayedCameraView: UIView {
         self.isActive = true
         self.isFrontCamera = useFrontCamera
         self.isPaused = false
+        self.isCameraWarmedUp = false
+        self.warmupGeneration += 1
+
+        // Ensure countdown box is hidden during the 1-second camera warmup
+        countdownLabel.alpha = 0
+        countdownLabel.text = ""
+        countdownStopButton.alpha = 0
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.setupCamera(useFrontCamera: useFrontCamera)
         }
@@ -390,6 +408,13 @@ final class DelayedCameraView: UIView {
         isActive = false
         isShowingDelayed = false
         isPaused = false
+        isCameraWarmedUp = false
+        warmupGeneration += 1  // invalidates any pending warmup timer
+
+        // Reset countdown UI so it never shows stale/empty during next warmup
+        countdownLabel.alpha = 0
+        countdownLabel.text = ""
+        countdownStopButton.alpha = 0
 
         displayTimer?.invalidate(); displayTimer = nil
         stopRecordingIndicator()
@@ -503,6 +528,7 @@ final class DelayedCameraView: UIView {
                 camera.unlockForConfiguration()
             } catch { }
 
+            // videoSettings captured for use after warmup delay
             let videoWidth = 1920, videoHeight = 1080
             let videoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.h264,
@@ -516,7 +542,8 @@ final class DelayedCameraView: UIView {
                 ]
             ]
 
-            try? self.videoFileBuffer?.startWriting(videoSettings: videoSettings, isInitialStart: true)
+            // ── Do NOT call startWriting yet — wait for warmup ────────────────
+            // captureOutput will drop all frames until isCameraWarmedUp = true.
 
             DispatchQueue.main.async {
                 let preview = AVCaptureVideoPreviewLayer(session: self.captureSession)
@@ -536,7 +563,27 @@ final class DelayedCameraView: UIView {
 
             self.captureQueue.async {
                 if !self.captureSession.isRunning { self.captureSession.startRunning() }
-                DispatchQueue.main.async { self.startCountdown() }
+
+                // Capture generation so a stale closure from a previous session
+                // can detect it has been superseded and bail out safely.
+                let myGeneration = self.warmupGeneration
+
+                // Wait 1 second for the camera's black fade-in to complete before
+                // starting the buffer writer and allowing frames into the pipeline.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self, self.isActive,
+                          self.warmupGeneration == myGeneration else { return }
+                    self.captureQueue.async {
+                        try? self.videoFileBuffer?.startWriting(videoSettings: videoSettings,
+                                                                isInitialStart: true)
+                        // Set warmedUp on the capture queue so captureOutput sees it
+                        // immediately on the same thread — no race with the writer.
+                        self.isCameraWarmedUp = true
+                        DispatchQueue.main.async {
+                            self.startCountdown()
+                        }
+                    }
+                }
             }
         }
     }
@@ -560,6 +607,14 @@ final class DelayedCameraView: UIView {
         isPaused = false
         isShowingDelayed = false
         isActive = false
+        isCameraWarmedUp = false
+        warmupGeneration += 1
+
+        // Hide countdown UI immediately so the empty/stale label doesn't show
+        // during the 1-second camera warmup on the next session.
+        countdownLabel.alpha = 0
+        countdownLabel.text = ""
+        countdownStopButton.alpha = 0
 
         if let durationLabel = recordingIndicator.viewWithTag(996) as? UILabel {
             durationLabel.text = "00:00:00"
@@ -616,7 +671,7 @@ final class DelayedCameraView: UIView {
     }
 
     private func startRecordingIndicator() {
-        UIView.animate(withDuration: 0.3) { self.recordingIndicator.alpha = 1 }
+        UIView.animate(withDuration: 0.4) { self.recordingIndicator.alpha = 1 }
         if let dot = recordingIndicator.viewWithTag(999) {
             let b = CABasicAnimation(keyPath: "opacity")
             b.fromValue = 1.0; b.toValue = 0.0; b.duration = 0.8
@@ -642,17 +697,25 @@ final class DelayedCameraView: UIView {
     private func startCountdown() {
         var countdown = delaySeconds
         countdownLabel.text = "\(countdown)"
-        countdownLabel.alpha = 1
-        countdownStopButton.alpha = 1
+        countdownStopButton.alpha = 0
+
+        UIView.animate(withDuration: 0.4) {
+            self.countdownLabel.alpha = 1
+            self.countdownStopButton.alpha = 1
+        }
 
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             guard let self, self.isActive else { timer.invalidate(); return }
             countdown -= 1
             if countdown <= 0 {
                 timer.invalidate()
-                self.countdownLabel.alpha = 0
-                self.countdownStopButton.alpha = 0
-                self.startDelayedDisplay()
+                // Fade out label and X button, then start delayed display
+                UIView.animate(withDuration: 0.3) {
+                    self.countdownLabel.alpha = 0
+                    self.countdownStopButton.alpha = 0
+                } completion: { _ in
+                    self.startDelayedDisplay()
+                }
             } else {
                 self.countdownLabel.text = "\(countdown)"
             }
@@ -669,12 +732,14 @@ final class DelayedCameraView: UIView {
         recordingDurationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.updateRecordingDuration()
         }
-        startRecordingIndicator()
 
-        UIView.animate(withDuration: 0.3) {
+        // Fade in display, recording indicator, and pause button all together
+        UIView.animate(withDuration: 0.4) {
             self.displayImageView.alpha = 1
             self.previewLayer?.opacity = 0
         }
+        startRecordingIndicator()
+        showLivePauseButton()
 
         let actualFPS = Settings.shared.currentFPS(isFrontCamera: isFrontCamera)
         let delayFrames = delaySeconds * actualFPS
@@ -690,7 +755,6 @@ final class DelayedCameraView: UIView {
             }
         }
         RunLoop.main.add(displayTimer!, forMode: .common)
-        showLivePauseButton()
         startActivityCheckTimer()
     }
 
@@ -898,7 +962,7 @@ extension DelayedCameraView: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard isActive, !isPaused, let buf = videoFileBuffer else { return }
+        guard isActive, !isPaused, isCameraWarmedUp, let buf = videoFileBuffer else { return }
         buf.appendFrame(sampleBuffer: sampleBuffer) { _ in }
     }
 
