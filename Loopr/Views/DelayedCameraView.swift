@@ -60,11 +60,32 @@ final class DelayedCameraView: UIView {
 
     // MARK: - UI — countdown / pause overlay
 
-    /// Shown during the black warmup period so the user knows the app is
-    /// intentionally initializing, not frozen.
+    private let warmupMessages: [String] = [
+        "Get ready...",
+        "Eyes on the ball...",
+        "Take your stance...",
+        "Find your focus...",
+        "Lock in...",
+        "Settle in...",
+        "Clear your mind...",
+        "Take a deep breath...",
+        "This is your moment...",
+        "Zero in...",
+        "Let's do this...",
+        "Better than last time...",
+        "Make it look easy...",
+        "You've got this...",
+        "Cameras rolling...",
+        "Let's see what you've got...",
+        "Show me something...",
+        "Time to shine...",
+        "Make it count...",
+        "Your best swing yet..."
+    ]
+    private var warmupQueue: [String] = []
+
     private let warmupLabel: UILabel = {
         let l = UILabel()
-        l.text = "Get ready..."
         l.font = .systemFont(ofSize: 30, weight: .light)
         l.textColor = UIColor.white.withAlphaComponent(0.55)
         l.textAlignment = .center
@@ -299,8 +320,10 @@ final class DelayedCameraView: UIView {
             recordedView.topAnchor.constraint(equalTo: topAnchor),
             recordedView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
+            // Same vertical offset as countdownLabel so the message sits in
+            // the same visual sweet-spot — centered between top and X button.
             warmupLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            warmupLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            warmupLabel.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -60),
             warmupLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 40),
             warmupLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -40),
 
@@ -411,12 +434,13 @@ final class DelayedCameraView: UIView {
         self.isCameraWarmedUp = false
         self.warmupGeneration += 1
 
-        // Ensure countdown label is hidden during warmup — it has no valid
-        // number to show yet. The stop button and warmup label have no camera
-        // dependency so fade them in immediately.
+        // Ensure countdown label is hidden — no valid number yet.
+        // Show X button and warmup message immediately so the user always
+        // has an affordance and context during the black warmup period.
         countdownLabel.alpha = 0
         countdownLabel.text = ""
         countdownStopButton.alpha = 0
+        warmupLabel.text = nextWarmupMessage()
         warmupLabel.alpha = 0
         UIView.animate(withDuration: 0.3) {
             self.countdownStopButton.alpha = 1
@@ -437,7 +461,7 @@ final class DelayedCameraView: UIView {
         isCameraWarmedUp = false
         warmupGeneration += 1  // invalidates any pending warmup timer
 
-        // Reset countdown UI so it never shows stale/empty during next warmup
+        // Reset UI
         countdownLabel.alpha = 0
         countdownLabel.text = ""
         countdownStopButton.alpha = 0
@@ -454,6 +478,13 @@ final class DelayedCameraView: UIView {
         captureQueue.async { [weak self] in
             guard let self else { return }
             self.captureSession?.stopRunning()
+
+            let oldSession = self.captureSession
+            self.captureSession = nil
+            self.videoDataOutput = nil
+            self.currentDevice = nil
+            _ = oldSession
+
             let old = self.videoFileBuffer
             self.videoFileBuffer = nil
             old?.cleanup()
@@ -462,7 +493,10 @@ final class DelayedCameraView: UIView {
                 self.previewLayer?.removeFromSuperlayer()
                 self.previewLayer = nil
                 self.displayImageView.alpha = 0
-                self.onSessionStopped?()
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.onSessionStopped?()
+                }
             }
         }
     }
@@ -576,7 +610,7 @@ final class DelayedCameraView: UIView {
                 let preview = AVCaptureVideoPreviewLayer(session: self.captureSession)
                 preview.videoGravity = .resizeAspectFill
                 preview.frame = self.bounds
-                preview.opacity = 0  // Hidden until camera is fully settled
+                preview.opacity = 0  // Hidden until camera fully settles
                 self.layer.insertSublayer(preview, at: 0)
                 self.previewLayer = preview
                 self.forceOrientationUpdate()
@@ -608,11 +642,7 @@ final class DelayedCameraView: UIView {
                         // immediately on the same thread — no race with the writer.
                         self.isCameraWarmedUp = true
                         DispatchQueue.main.async {
-                            // Fade the preview in and warmup label out together
-                            // now that the camera is fully settled.
-                            UIView.animate(withDuration: 0.4) {
-                                self.warmupLabel.alpha = 0
-                            }
+                            UIView.animate(withDuration: 0.4) { self.warmupLabel.alpha = 0 }
                             CATransaction.begin()
                             CATransaction.setAnimationDuration(0.4)
                             self.previewLayer?.opacity = 1
@@ -647,11 +677,11 @@ final class DelayedCameraView: UIView {
         isCameraWarmedUp = false
         warmupGeneration += 1
 
-        // Hide the label immediately — it has no valid number yet.
-        // Show the stop button and warmup label right away.
+        // Show next message and stop button immediately.
         countdownLabel.alpha = 0
         countdownLabel.text = ""
         countdownStopButton.alpha = 0
+        warmupLabel.text = nextWarmupMessage()
         warmupLabel.alpha = 0
         UIView.animate(withDuration: 0.3) {
             self.countdownStopButton.alpha = 1
@@ -669,6 +699,12 @@ final class DelayedCameraView: UIView {
             guard let self else { return }
             self.captureSession?.stopRunning()
 
+            let oldSession = self.captureSession
+            self.captureSession = nil
+            self.videoDataOutput = nil
+            self.currentDevice = nil
+            _ = oldSession
+
             let oldBuffer = self.videoFileBuffer
             self.videoFileBuffer = nil
             oldBuffer?.cleanup()
@@ -676,16 +712,6 @@ final class DelayedCameraView: UIView {
             DispatchQueue.main.async {
                 self.previewLayer?.removeFromSuperlayer()
                 self.previewLayer = nil
-
-                if let session = self.captureSession {
-                    session.beginConfiguration()
-                    session.inputs.forEach { session.removeInput($0) }
-                    session.outputs.forEach { session.removeOutput($0) }
-                    session.commitConfiguration()
-                }
-                self.captureSession = nil
-                self.videoDataOutput = nil
-                self.currentDevice = nil
                 self.displayImageView.alpha = 0
 
                 self.isActive = true
@@ -693,12 +719,29 @@ final class DelayedCameraView: UIView {
                 self.delaySeconds = savedDelay
                 self.isPaused = false
 
-                self.setupCamera(useFrontCamera: savedFront)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self, self.isActive else { return }
+                    self.setupCamera(useFrontCamera: savedFront)
+                }
             }
         }
     }
 
     // MARK: - UI Helpers
+
+    /// Returns the next message from a shuffled queue. Refills and reshuffles
+    /// when empty, ensuring no repeats until all messages are shown, and that
+    /// the first message of a new cycle never matches the last one shown.
+    private func nextWarmupMessage() -> String {
+        if warmupQueue.isEmpty {
+            var fresh = warmupMessages.shuffled()
+            if let last = warmupLabel.text, fresh.first == last, fresh.count > 1 {
+                fresh.append(fresh.removeFirst())
+            }
+            warmupQueue = fresh
+        }
+        return warmupQueue.removeFirst()
+    }
 
     private func showLivePauseButton() {
         UIView.animate(withDuration: 0.3) { self.livePauseButton.alpha = 1 }
@@ -739,8 +782,7 @@ final class DelayedCameraView: UIView {
     private func startCountdown() {
         var countdown = delaySeconds
         countdownLabel.text = "\(countdown)"
-        // countdownStopButton is already visible — shown immediately in startSession.
-        // Just fade in the countdown label.
+        // countdownStopButton already visible — just fade the label in.
         UIView.animate(withDuration: 0.4) {
             self.countdownLabel.alpha = 1
         }
@@ -750,8 +792,6 @@ final class DelayedCameraView: UIView {
             countdown -= 1
             if countdown <= 0 {
                 timer.invalidate()
-                // Fade out the countdown label and start delayed display immediately
-                // so the stop button crossfades into the pause button with no gap.
                 UIView.animate(withDuration: 0.3) {
                     self.countdownLabel.alpha = 0
                     self.countdownStopButton.alpha = 0

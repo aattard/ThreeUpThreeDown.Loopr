@@ -154,6 +154,9 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     }()
 
     private var isSessionActive = false
+    /// True during the brief hardware-release delay after a session stops.
+    /// Prevents a new session starting before the OS reclaims the camera.
+    private var isTearingDown = false
     
     // ─────────────────────────────────────────────────────────────────────
     // MARK: - Lifecycle
@@ -433,7 +436,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     // ─────────────────────────────────────────────────────────────────────
     
     @objc private func startSessionTapped() {
-        guard !isSessionActive else { return }
+        guard !isSessionActive, !isTearingDown else { return }
         print("🎬 Start Session tapped")
 
         if !PurchaseManager.shared.canStartSession() {
@@ -457,8 +460,8 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     private func beginSession() {
         isSessionActive = true
 
-        // Fade out everything except the start button — it stays visible so it
-        // can crossfade with the stop button in DelayedCameraView.
+        // Fade everything out except startButton — it stays visible so it
+        // can crossfade with countdownStopButton in DelayedCameraView.
         UIView.animate(withDuration: 0.3) {
             self.logoImageView.alpha = 0
             self.controlsStackView.alpha = 0
@@ -467,7 +470,7 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         }
 
         cameraPreviewView.stopPreview { [weak self] in
-            guard let self else { return }
+            guard let self = self else { return }
             print("🎬 Starting delayed camera...")
 
             self.cameraPreviewView.isHidden = true
@@ -484,9 +487,8 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
             self.view.bringSubviewToFront(self.controlsStackView)
             self.view.bringSubviewToFront(self.startButton)
 
-            // startSession immediately begins fading in countdownStopButton (0.3s).
-            // Fade out startButton over the same duration so the two crossfade —
-            // the user sees the button change from play to X with no black gap.
+            // startSession immediately fades the X button in (0.3s).
+            // Fade startButton out at the same time — play → X crossfade.
             self.delayedCameraView?.startSession(
                 delaySeconds: Settings.shared.playbackDelay,
                 useFrontCamera: Settings.shared.useFrontCamera
@@ -501,9 +503,14 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         print("🏠 Session stopped, returning to home")
         
         isSessionActive = false
+        isTearingDown = true
         
         delayedCameraView?.removeFromSuperview()
         delayedCameraView = nil
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.isTearingDown = false
+        }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
