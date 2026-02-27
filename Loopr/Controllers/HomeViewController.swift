@@ -457,35 +457,43 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
     private func beginSession() {
         isSessionActive = true
 
+        // Fade out everything except the start button — it stays visible so it
+        // can crossfade with the stop button in DelayedCameraView.
+        UIView.animate(withDuration: 0.3) {
+            self.logoImageView.alpha = 0
+            self.controlsStackView.alpha = 0
+            self.infoButton.alpha = 0
+            self.trialBadgeButton.alpha = 0
+        }
+
         cameraPreviewView.stopPreview { [weak self] in
-            guard let self = self else { return }
+            guard let self else { return }
             print("🎬 Starting delayed camera...")
-            
+
             self.cameraPreviewView.isHidden = true
             self.delayedCameraView = DelayedCameraView(frame: self.view.bounds)
             self.delayedCameraView?.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             self.view.insertSubview(self.delayedCameraView!, at: 0)
-            
+
             self.delayedCameraView?.onSessionStopped = { [weak self] in
                 self?.handleSessionStopped()
             }
-            
+
+            // Keep startButton on top so it's visible during the crossfade.
             self.view.bringSubviewToFront(self.logoImageView)
             self.view.bringSubviewToFront(self.controlsStackView)
             self.view.bringSubviewToFront(self.startButton)
-            
+
+            // startSession immediately begins fading in countdownStopButton (0.3s).
+            // Fade out startButton over the same duration so the two crossfade —
+            // the user sees the button change from play to X with no black gap.
             self.delayedCameraView?.startSession(
                 delaySeconds: Settings.shared.playbackDelay,
                 useFrontCamera: Settings.shared.useFrontCamera
             )
-        }
-        
-        UIView.animate(withDuration: 0.3) {
-            self.logoImageView.alpha = 0
-            self.controlsStackView.alpha = 0
-            self.startButton.alpha = 0
-            self.infoButton.alpha = 0
-            self.trialBadgeButton.alpha = 0
+            UIView.animate(withDuration: 0.3) {
+                self.startButton.alpha = 0
+            }
         }
     }
     
