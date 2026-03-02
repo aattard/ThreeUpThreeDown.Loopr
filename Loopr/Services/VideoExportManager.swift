@@ -128,7 +128,7 @@ final class VideoExportManager {
             instruction.layerInstructions = [layerInstruction]
             vc.instructions = [instruction]
 
-            // ── Watermark overlay ─────────────────────────────────────────────
+            // ── Watermark + timestamp overlay ────────────────────────────────────
             if let animTool = makeWatermarkAnimationTool(canvasSize: vc.renderSize) {
                 vc.animationTool = animTool
             }
@@ -150,8 +150,8 @@ final class VideoExportManager {
 
     // MARK: - Watermark
 
-    /// Burns "watermark-logo" from Assets into the bottom-right corner of every frame.
-    /// Size: ~6% of the shorter canvas dimension (~65px on 1080p). Opacity: 0.35.
+    /// Burns "watermark-logo" from Assets into the top-right corner and a date/time
+    /// stamp into the bottom-left corner of every frame.
     private static func makeWatermarkAnimationTool(canvasSize: CGSize) -> AVVideoCompositionCoreAnimationTool? {
         guard let image = UIImage(named: "watermark-logo") else {
             print("⚠️ VideoExport: watermark-logo image not found in asset catalog")
@@ -170,6 +170,7 @@ final class VideoExportManager {
         parentLayer.frame = CGRect(origin: .zero, size: canvasSize)
         parentLayer.addSublayer(videoLayer)
 
+        // ── Logo mark (top-right) ─────────────────────────────────────────────
         let markLayer = CALayer()
         markLayer.contents        = image.cgImage
         markLayer.contentsGravity = .resizeAspect
@@ -182,9 +183,99 @@ final class VideoExportManager {
         )
         parentLayer.addSublayer(markLayer)
 
+        // ── Date/time stamp (bottom-left) ─────────────────────────────────────
+        let tsLayer = makeTimestampLayer(date: Date(), canvasSize: canvasSize)
+        parentLayer.addSublayer(tsLayer)
+
         return AVVideoCompositionCoreAnimationTool(
             postProcessingAsVideoLayer: videoLayer,
             in: parentLayer
         )
     }
+
+    // MARK: - Timestamp Layer
+
+    /// Creates a CATextLayer showing the current date/time as "MM/DD/YYYY HH:MM:SS TZ"
+    /// (e.g. "03/02/2026 13:56:00 EST") styled to match the recording indicator pill
+    /// in DelayedCameraView — same font (monospacedDigitSystemFont, light), same pill
+    /// proportions. Font size is fixed small so the watermark stays unobtrusive when
+    /// burned into a 1080p/1920p canvas.
+    ///
+    /// - Important: AVFoundation composites CALayer trees with a **bottom-up** y-axis
+    ///   (origin at bottom-left), so a layer at `y = inset` sits `inset` pixels above
+    ///   the bottom edge of the canvas — which is visually the bottom-left corner.
+    static func makeTimestampLayer(date: Date, canvasSize: CGSize) -> CALayer {
+
+        // ── Format the timestamp ──────────────────────────────────────────────
+        // Format date and time separately so we control the separator (space,
+        // not the locale-injected comma that combined dateStyle+timeStyle produces).
+        let datePart = DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .none)
+        let timePart = DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .short)
+
+        let offsetSeconds = TimeZone.current.secondsFromGMT(for: date)
+        let offsetHours   = offsetSeconds / 3600
+        let offsetMins    = abs((offsetSeconds % 3600) / 60)
+        let offsetLabel   = offsetMins == 0
+            ? String(format: "GMT%+d", offsetHours)
+            : String(format: "GMT%+d:%02d", offsetHours, offsetMins)
+
+        let timestampString = "\(datePart) \(timePart) \(offsetLabel)"
+        // → "3/2/2026 2:37 PM GMT-5"
+
+        // ── Sizing ────────────────────────────────────────────────────────────
+        let fontSize: CGFloat     = 22
+        let pillH: CGFloat        = 36
+        let cornerRadius: CGFloat = 18
+        let hInset: CGFloat       = 12
+        let canvasInset: CGFloat  = 20
+        let maxPillW: CGFloat     = canvasSize.width - (canvasInset * 2)
+
+        // ── Measure text width ────────────────────────────────────────────────
+        let uiFont  = UIFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .light)
+        let ctFont  = uiFont as CTFont
+
+        let attrs: [NSAttributedString.Key: Any] = [.font: uiFont]
+        let attrString = NSAttributedString(string: timestampString, attributes: attrs)
+        let framesetter = CTFramesetterCreateWithAttributedString(attrString)
+        let textSize = CTFramesetterSuggestFrameSizeWithConstraints(
+            framesetter,
+            CFRangeMake(0, attrString.length),
+            nil,
+            CGSize(width: CGFloat.greatestFiniteMagnitude, height: pillH),
+            nil
+        )
+        let textWidth        = ceil(textSize.width)
+        let pillW            = min(textWidth + hInset * 2, maxPillW)
+        let clampedTextWidth = pillW - hInset * 2
+
+        // ── Background pill ───────────────────────────────────────────────────
+        let bgLayer             = CALayer()
+        bgLayer.frame           = CGRect(x: canvasInset, y: canvasInset, width: pillW, height: pillH)
+        bgLayer.backgroundColor = UIColor.black.withAlphaComponent(0.45).cgColor
+        bgLayer.cornerRadius    = cornerRadius
+        bgLayer.masksToBounds   = true
+
+        // ── Text layer ────────────────────────────────────────────────────────
+        let ascender   = CTFontGetAscent(ctFont)
+        let descender  = CTFontGetDescent(ctFont)
+        let leading    = CTFontGetLeading(ctFont)
+        let lineHeight = ceil(ascender + descender + leading)
+        let textY      = round((pillH - lineHeight) / 2.0)
+
+        let textLayer             = CATextLayer()
+        textLayer.frame           = CGRect(x: hInset, y: textY, width: clampedTextWidth, height: lineHeight)
+        textLayer.font            = ctFont
+        textLayer.fontSize        = fontSize
+        textLayer.string          = timestampString
+        textLayer.foregroundColor = UIColor.white.cgColor
+        textLayer.alignmentMode   = .left
+        textLayer.contentsScale   = 1.0
+        textLayer.isWrapped       = false
+        textLayer.truncationMode  = .end
+
+        bgLayer.addSublayer(textLayer)
+        return bgLayer
+    }
+
+
 }

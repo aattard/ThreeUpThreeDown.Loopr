@@ -186,7 +186,7 @@ final class SplitVideoExportManager {
         vc.renderSize    = outputSize
         vc.instructions  = [instruction]
 
-        // ── Watermark overlay ─────────────────────────────────────────────────
+        // ── Watermark + timestamp overlay ─────────────────────────────────────
         if let animTool = makeWatermarkAnimationTool(canvasSize: outputSize) {
             vc.animationTool = animTool
         }
@@ -196,8 +196,8 @@ final class SplitVideoExportManager {
 
     // MARK: - Watermark
 
-    /// Burns "watermark-logo" from Assets into the bottom-right corner of every frame.
-    /// Size: ~6% of the shorter canvas dimension (~65px on 1080p). Opacity: 0.35.
+    /// Burns "watermark-logo" from Assets into the top-right corner and a date/time
+    /// stamp into the bottom-left corner of every frame.
     private static func makeWatermarkAnimationTool(canvasSize: CGSize) -> AVVideoCompositionCoreAnimationTool? {
         guard let image = UIImage(named: "watermark-logo") else {
             print("⚠️ SplitExport: watermark-logo image not found in asset catalog")
@@ -222,6 +222,7 @@ final class SplitVideoExportManager {
         parentLayer.frame = CGRect(origin: .zero, size: canvasSize)
         parentLayer.addSublayer(videoLayer)
 
+        // ── Logo mark (top-right) ─────────────────────────────────────────────
         let markLayer = CALayer()
         markLayer.contents        = image.cgImage
         markLayer.contentsGravity = .resizeAspect
@@ -233,6 +234,10 @@ final class SplitVideoExportManager {
             height: markSize
         )
         parentLayer.addSublayer(markLayer)
+
+        // ── Date/time stamp (bottom-left) ─────────────────────────────────────
+        let tsLayer = VideoExportManager.makeTimestampLayer(date: Date(), canvasSize: canvasSize)
+        parentLayer.addSublayer(tsLayer)
 
         return AVVideoCompositionCoreAnimationTool(
             postProcessingAsVideoLayer: videoLayer,
@@ -366,6 +371,7 @@ final class SplitVideoExportManager {
         // ── Build the final matrix from scratch ───────────────────────────────
         //
         // AVFoundation layer transforms map: raw-pixel-point → canvas-pixel-point.
+        //
         // For each rotation case we know exactly where the raw frame's axes go,
         // so we can write the matrix components directly.
         //
