@@ -350,6 +350,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let v = UIView()
         v.backgroundColor = .systemYellow
         v.layer.cornerRadius = 3
+        v.layer.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.isUserInteractionEnabled = true
@@ -373,6 +374,7 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let v = UIView()
         v.backgroundColor = .systemYellow
         v.layer.cornerRadius = 3
+        v.layer.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.isUserInteractionEnabled = true

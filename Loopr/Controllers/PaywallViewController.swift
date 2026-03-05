@@ -1,5 +1,6 @@
 import UIKit
 import StoreKit
+import SafariServices
 
 class PaywallViewController: UIViewController {
 
@@ -180,15 +181,48 @@ class PaywallViewController: UIViewController {
         return b
     }()
 
-    private let legalLabel: UILabel = {
-        let l = UILabel()
-        l.text = "Payment is charged to your Apple ID at confirmation of purchase."
-        l.font = UIFont.systemFont(ofSize: 12)
-        l.textColor = UIColor.darkGray
-        l.textAlignment = .center
-        l.numberOfLines = 0
-        l.translatesAutoresizingMaskIntoConstraints = false
-        return l
+    private let legalTextView: UITextView = {
+        let tv = UITextView()
+        tv.backgroundColor = .clear
+        tv.isEditable = false
+        tv.isScrollEnabled = false
+        tv.textAlignment = .center
+        tv.translatesAutoresizingMaskIntoConstraints = false
+
+        let base = "Payment is charged to your Apple ID at confirmation of purchase.\n"
+        let full = base + "Privacy Policy  ·  Terms of Use"
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+
+        let attributed = NSMutableAttributedString(string: full)
+        let fullRange = NSRange(full.startIndex..., in: full)
+
+        // Base style for all text
+        attributed.addAttributes([
+            .font: UIFont.systemFont(ofSize: 12),
+            .foregroundColor: UIColor.darkGray,
+            .paragraphStyle: paragraphStyle
+        ], range: fullRange)
+
+        // Privacy Policy link
+        if let privacyRange = full.range(of: "Privacy Policy") {
+            attributed.addAttribute(.link, value: "https://loopr.3up3down.io/privacy.html",
+                                    range: NSRange(privacyRange, in: full))
+        }
+
+        // Terms of Use link
+        if let termsRange = full.range(of: "Terms of Use") {
+            attributed.addAttribute(.link, value: "https://loopr.3up3down.io/terms.html",
+                                    range: NSRange(termsRange, in: full))
+        }
+
+        tv.attributedText = attributed
+        tv.linkTextAttributes = [
+            .foregroundColor: UIColor.systemBlue,
+            .underlineStyle: NSUnderlineStyle.single.rawValue
+        ]
+        return tv
     }()
 
     private let activityIndicator: UIActivityIndicatorView = {
@@ -296,7 +330,7 @@ class PaywallViewController: UIViewController {
         [logoImageView, headlineLabel, subheadlineLabel,
          carouselCollectionView, pageControl,
          purchaseButton, priceNoteLabel,
-         restoreButton, legalLabel].forEach { contentView.addSubview($0) }
+         restoreButton, legalTextView].forEach { contentView.addSubview($0) }
 
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -343,10 +377,10 @@ class PaywallViewController: UIViewController {
             restoreButton.topAnchor.constraint(equalTo: priceNoteLabel.bottomAnchor, constant: 16),
             restoreButton.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
 
-            legalLabel.topAnchor.constraint(equalTo: restoreButton.bottomAnchor, constant: 20),
-            legalLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
-            legalLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
-            legalLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -40),
+            legalTextView.topAnchor.constraint(equalTo: restoreButton.bottomAnchor, constant: 12),
+            legalTextView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            legalTextView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
+            legalTextView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -40),
 
             activityIndicator.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             activityIndicator.centerYAnchor.constraint(equalTo: view.centerYAnchor)
@@ -354,6 +388,7 @@ class PaywallViewController: UIViewController {
 
         purchaseButton.addTarget(self, action: #selector(purchaseTapped), for: .touchUpInside)
         restoreButton.addTarget(self, action: #selector(restoreTapped), for: .touchUpInside)
+        legalTextView.delegate = self
     }
 
     // MARK: - Auto Scroll
@@ -547,6 +582,18 @@ extension PaywallViewController: UICollectionViewDelegateFlowLayout {
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
             self?.startAutoScroll()
         }
+    }
+}
+
+// MARK: - UITextViewDelegate (Legal Links)
+
+extension PaywallViewController: UITextViewDelegate {
+    func textView(_ textView: UITextView, shouldInteractWith URL: URL,
+                  in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
+        let safari = SFSafariViewController(url: URL)
+        safari.preferredControlTintColor = purple
+        present(safari, animated: true)
+        return false  // We handle it — don't let UITextView open Safari
     }
 }
 
