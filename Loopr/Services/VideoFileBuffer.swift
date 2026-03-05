@@ -86,6 +86,13 @@ class VideoFileBuffer {
     private var motionScores: [Float] = []
     private var prevFramePixelBuffer: CVPixelBuffer?
 
+    /// The rotation angle (in degrees) of the recording session.
+    /// Set by the caller before recording begins so computeMotionScore can orient
+    /// the thumbnail correctly. Back camera raw pixel buffers arrive in landscape
+    /// orientation from the sensor — without rotating before diffing, motion scores
+    /// are artificially small because the athlete occupies fewer pixels in the frame.
+    var recordingRotationAngle: CGFloat = 0
+
     // MARK: - Private state — live-delay cache
 
     private var recentFramesCache: [UIImage] = []
@@ -672,81 +679,105 @@ class VideoFileBuffer {
     /// (~0.5 ms on a modern A-series chip) and safe to call on the capture queue every frame.
     ///
     /// Returns 0 if there is no previous frame (first frame), or if locking either buffer fails.
+    ///
+    /// IMPORTANT — pixel format handling:
+    /// The back camera delivers YCbCr (kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) buffers.
+    /// The front camera delivers BGRA buffers (because Apple's mirror pipeline converts them).
+    /// We use CIContext.render(into:) to a fresh BGRA CVPixelBuffer so the luma byte arithmetic
+    /// below works identically regardless of which camera is active.
     private func computeMotionScore(current: CVPixelBuffer, previous: CVPixelBuffer?) -> Float {
         guard let previous else { return 0.0 }
+
+        // ── Diagnostic: log pixel format on first frame only ─────────────────────
+        // kCVPixelFormatType_32BGRA                        = 1111970369 ('BGRA')
+        // kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange  =  875704438 ('420v')
+        // kCVPixelFormatType_420YpCbCr8BiPlanarFullRange   =  875704422 ('420f')
+        if motionScores.isEmpty {
+            let fmt = CVPixelBufferGetPixelFormatType(current)
+            let fmtStr = String(format: "0x%08X (%u)", fmt, fmt)
+            print("🎥 computeMotionScore — pixel format: \(fmtStr) | " +
+                  "size: \(CVPixelBufferGetWidth(current))×\(CVPixelBufferGetHeight(current))")
+        }
 
         // ── Thumbnail dimensions ──────────────────────────────────────────────────
         let thumbWidth  = 64
         let thumbHeight = 36
 
-        // ── Helper: create a tiny CIImage from a pixel buffer ────────────────────
-        func thumbnail(from pb: CVPixelBuffer) -> CIImage {
-            CIImage(cvPixelBuffer: pb)
-                .transformed(by: CGAffineTransform(
-                    scaleX: CGFloat(thumbWidth)  / CGFloat(CVPixelBufferGetWidth(pb)),
-                    y:      CGFloat(thumbHeight) / CGFloat(CVPixelBufferGetHeight(pb))))
+        // ── Helper: render a pixel buffer into a fresh BGRA thumbnail ────────────
+        // Using CIContext.render(into:) guarantees BGRA output regardless of whether
+        // the source is YCbCr (back camera) or BGRA (front camera).
+        func makeBGRAThumbnail(from pb: CVPixelBuffer) -> CVPixelBuffer? {
+            let src = CIImage(cvPixelBuffer: pb)
+            let scaleX = CGFloat(thumbWidth)  / CGFloat(CVPixelBufferGetWidth(pb))
+            let scaleY = CGFloat(thumbHeight) / CGFloat(CVPixelBufferGetHeight(pb))
+            let scaled = src.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+            var outBuffer: CVPixelBuffer?
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                thumbWidth, thumbHeight,
+                kCVPixelFormatType_32BGRA,
+                [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+                &outBuffer)
+            guard status == kCVReturnSuccess, let out = outBuffer else { return nil }
+
+            ciContext.render(scaled, to: out,
+                             bounds: CGRect(x: 0, y: 0,
+                                            width: thumbWidth, height: thumbHeight),
+                             colorSpace: CGColorSpaceCreateDeviceRGB())
+            return out
         }
 
-        let ciCurrent  = thumbnail(from: current)
-        let ciPrevious = thumbnail(from: previous)
+        guard let bufCurrent  = makeBGRAThumbnail(from: current),
+              let bufPrevious = makeBGRAThumbnail(from: previous) else { return 0.0 }
 
-        // ── Render both thumbnails to raw BGRA bytes ─────────────────────────────
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bpc = 8, bpr = thumbWidth * 4
-        guard
-            let cgCurrent  = ciContext.createCGImage(ciCurrent,  from: ciCurrent.extent),
-            let cgPrevious = ciContext.createCGImage(ciPrevious, from: ciPrevious.extent),
-            let ctxCurrent  = CGContext(data: nil, width: thumbWidth, height: thumbHeight,
-                                        bitsPerComponent: bpc, bytesPerRow: bpr,
-                                        space: colorSpace,
-                                        bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue),
-            let ctxPrevious = CGContext(data: nil, width: thumbWidth, height: thumbHeight,
-                                        bitsPerComponent: bpc, bytesPerRow: bpr,
-                                        space: colorSpace,
-                                        bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue)
-        else { return 0.0 }
+        // ── Lock both buffers and diff their luma bytes ───────────────────────────
+        CVPixelBufferLockBaseAddress(bufCurrent,  .readOnly)
+        CVPixelBufferLockBaseAddress(bufPrevious, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(bufCurrent,  .readOnly)
+            CVPixelBufferUnlockBaseAddress(bufPrevious, .readOnly)
+        }
 
-        let rect = CGRect(x: 0, y: 0, width: thumbWidth, height: thumbHeight)
-        ctxCurrent.draw(cgCurrent,   in: rect)
-        ctxPrevious.draw(cgPrevious, in: rect)
+        guard let ptrCurrent  = CVPixelBufferGetBaseAddress(bufCurrent),
+              let ptrPrevious = CVPixelBufferGetBaseAddress(bufPrevious) else { return 0.0 }
 
-        guard
-            let dataCurrent  = ctxCurrent.data,
-            let dataPrevious = ctxPrevious.data
-        else { return 0.0 }
-
-        // ── Sum absolute differences on luma (BT.601 from BGRA) ──────────────────
-        // BGRA layout: byte 0=B, 1=G, 2=R, 3=A (skip A)
         let pixelCount = thumbWidth * thumbHeight
         var totalDiff: Float = 0.0
 
-        let pCurrent  = dataCurrent.assumingMemoryBound(to: UInt8.self)
-        let pPrevious = dataPrevious.assumingMemoryBound(to: UInt8.self)
+        let pCurrent  = ptrCurrent.assumingMemoryBound(to: UInt8.self)
+        let pPrevious = ptrPrevious.assumingMemoryBound(to: UInt8.self)
 
+        // BGRA layout: byte 0=B, 1=G, 2=R, 3=A — BT.601 luma weights
         for i in 0 ..< pixelCount {
             let base = i * 4
-            // Luma ≈ 0.299·R + 0.587·G + 0.114·B
-            let lumaCurrent  = 0.299 * Float(pCurrent[base + 2])
+            let lumaCurrent  = 0.114 * Float(pCurrent[base])
                              + 0.587 * Float(pCurrent[base + 1])
-                             + 0.114 * Float(pCurrent[base])
-            let lumaPrevious = 0.299 * Float(pPrevious[base + 2])
+                             + 0.299 * Float(pCurrent[base + 2])
+            let lumaPrevious = 0.114 * Float(pPrevious[base])
                              + 0.587 * Float(pPrevious[base + 1])
-                             + 0.114 * Float(pPrevious[base])
+                             + 0.299 * Float(pPrevious[base + 2])
             totalDiff += abs(lumaCurrent - lumaPrevious)
         }
 
-        // Normalise: max possible diff per pixel is 255, so divide by (pixelCount * 255).
-        // Then apply a sensitivity multiplier to amplify the naturally small frame-to-frame
-        // differences at 30fps — empirically scores land in the 0.000–0.010 range without
-        // this, which compresses the waveform. A multiplier of 50 spreads them to 0.0–0.5+
-        // giving the power curve in the waveform renderer much more to work with.
-        // Clamp to 1.0 so the value stays a valid normalised score.
-        let sensitivityMultiplier: Float = 50.0
+        // Raw mean-absolute-difference, normalised to 0–1 range.
+        // We intentionally do NOT apply a sensitivity multiplier here — the
+        // waveform renderer uses percentile-based normalisation (p50 noise floor,
+        // p99 ceiling) which self-calibrates to whatever range the scores land in.
+        // A multiplier caused back camera scores to saturate at 1.0 on almost every
+        // frame (back camera frames have higher contrast than front camera), which
+        // collapsed p50==p99 and produced a flat line.
         let raw = totalDiff / (Float(pixelCount) * 255.0)
-        return min(raw * sensitivityMultiplier, 1.0)
+
+        // ── Diagnostic: log first 5 non-zero scores to confirm detection ─────────
+        if raw > 0 && motionScores.filter({ $0 > 0 }).count < 5 {
+            print("🎥 Motion score sample raw: \(String(format: "%.7f", raw))")
+        }
+
+        return raw
     }
 
-    // MARK: - Motion score accessor
+        // MARK: - Motion score accessor
 
     /// Returns a copy of the motion scores array, aligned 1:1 with frameTimestamps.
     /// Safe to call from any thread.

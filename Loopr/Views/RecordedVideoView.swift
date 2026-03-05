@@ -26,8 +26,10 @@ final class MotionWaveformLayer: CALayer {
     /// Maximum half-height as a fraction of the available half-height (0–1).
     static let maxHeightFraction: CGFloat = 0.85
 
-    /// Power curve exponent. 1.0 = linear. Increase toward 1.5 for more contrast.
-    static let contrastPower: Double = 1.0
+    /// Power curve exponent. 1.0 = linear. Values < 1.0 boost low-motion frames
+    /// so subtle differences between still and slightly-moving are visible.
+    /// 0.6 works well across both front and back cameras.
+    static let contrastPower: Double = 0.6
 
     // ── Data ─────────────────────────────────────────────────────────────────
 
@@ -350,7 +352,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let v = UIView()
         v.backgroundColor = .systemYellow
         v.layer.cornerRadius = 3
-        v.layer.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.isUserInteractionEnabled = true
@@ -374,7 +375,6 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
         let v = UIView()
         v.backgroundColor = .systemYellow
         v.layer.cornerRadius = 3
-        v.layer.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
         v.translatesAutoresizingMaskIntoConstraints = false
         v.isHidden = true
         v.isUserInteractionEnabled = true
@@ -760,7 +760,11 @@ final class RecordedVideoView: UIView, UIGestureRecognizerDelegate {
             return
         }
 
-        waveformLayer.scores = Array(allScores[arrayStart ..< arrayEnd])
+        let sliced = Array(allScores[arrayStart ..< arrayEnd])
+        let nonZero = sliced.filter { $0 > 0 }.count
+        let maxScore = sliced.max() ?? 0
+        print("🌊 updateWaveform — totalFrames:\(totalFrames) pausePoint:\(pausePoint) oldest:\(oldest) prunedCount:\(prunedCount) arrayStart:\(arrayStart) arrayEnd:\(arrayEnd) sliceCount:\(sliced.count) nonZeroScores:\(nonZero) maxScore:\(String(format:"%.5f",maxScore)) isFront:\(isFrontCamera)")
+        waveformLayer.scores = sliced
 
         // Make sure the layer covers the bar (layout may not have run yet at this point)
         CATransaction.begin()
