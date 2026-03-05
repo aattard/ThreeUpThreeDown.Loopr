@@ -143,13 +143,19 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Loopr/Loopr.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 260223;
 				DEVELOPMENT_TEAM = C769VC9239;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopr/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Loopr - Delayed Video Replay";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Loopr needs camera access to record and replay your swing.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audio is captured with video to preserve timing reference.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save your baseball or softball swing clips to your Photos library";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Save your baseball or softball swing clips to your Photos library";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -158,8 +164,9 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.adamattard.Loopr;
+				PRODUCT_BUNDLE_IDENTIFIER = io.3up3down.Loopr;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -175,13 +182,19 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Loopr/Loopr.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 260223;
 				DEVELOPMENT_TEAM = C769VC9239;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopr/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Loopr - Delayed Video Replay";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Loopr needs camera access to record and replay your swing.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audio is captured with video to preserve timing reference.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save your baseball or softball swing clips to your Photos library";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Save your baseball or softball swing clips to your Photos library";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
@@ -190,8 +203,9 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.adamattard.Loopr;
+				PRODUCT_BUNDLE_IDENTIFIER = io.3up3down.Loopr;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;

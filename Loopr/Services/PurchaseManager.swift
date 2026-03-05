@@ -10,7 +10,7 @@ import StoreKit
 //     Current (dev / local StoreKit testing):  "com.adamattard.Loopr.lifetime"
 //     Future  (App Store Connect):             "io.3up3down.Loopr.lifetime"
 // ─────────────────────────────────────────────────────────────────────────────
-private let kProductID = "com.adamattard.Loopr.lifetime"
+private let kProductID = "io.3up3down.Loopr.lifetime"
 
 // iCloud KVS key – never change this after shipping or existing trial dates
 // will be lost for real users.
@@ -72,7 +72,7 @@ final class PurchaseManager {
         }
     }
 
-    /// Initiates the $1.99 purchase flow.
+    /// Initiates the $4.99 purchase flow.
     func purchase() async throws {
         guard let product else {
             throw PurchaseError.productNotFound

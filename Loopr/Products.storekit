@@ -25,7 +25,7 @@
           "locale" : "en_US"
         }
       ],
-      "productID" : "com.adamattard.Loopr.lifetime",
+      "productID" : "io.3up3down.Loopr.lifetime",
       "referenceName" : "Loopr Lifetime Access",
       "type" : "NonConsumable"
     }
