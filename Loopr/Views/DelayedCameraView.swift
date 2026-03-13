@@ -434,6 +434,9 @@ final class DelayedCameraView: UIView {
         self.isCameraWarmedUp = false
         self.warmupGeneration += 1
 
+        // Prevent screen from dimming or sleeping while session is active
+        UIApplication.shared.isIdleTimerDisabled = true
+
         // Ensure countdown label is hidden — no valid number yet.
         // Show X button and warmup message immediately so the user always
         // has an affordance and context during the black warmup period.
@@ -460,6 +463,9 @@ final class DelayedCameraView: UIView {
         isPaused = false
         isCameraWarmedUp = false
         warmupGeneration += 1  // invalidates any pending warmup timer
+
+        // Re-enable idle timer now that the session is ending
+        UIApplication.shared.isIdleTimerDisabled = false
 
         // Reset UI
         countdownLabel.alpha = 0
@@ -873,6 +879,9 @@ final class DelayedCameraView: UIView {
         captureSession?.stopRunning()
         isPaused = true
         displayTimer?.invalidate(); displayTimer = nil
+
+        // Re-enable idle timer while paused — camera is no longer capturing
+        UIApplication.shared.isIdleTimerDisabled = false
 
         stopRecordingIndicator()
         hideLivePauseButton()

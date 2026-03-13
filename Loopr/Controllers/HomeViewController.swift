@@ -237,6 +237,29 @@ class HomeViewController: UIViewController, UIViewControllerTransitioningDelegat
         if status == .denied || status == .restricted {
             showCameraPermissionAlert()
         }
+
+        // Consume a pending Universal Link that arrived during cold launch
+        if let scene = view.window?.windowScene?.delegate as? SceneDelegate,
+           scene.pendingUniversalLink {
+            scene.pendingUniversalLink = false
+            handleUniversalLinkStart()
+        }
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────
+    // MARK: - Universal Link Entry Point
+    // ─────────────────────────────────────────────────────────────────────
+
+    func handleUniversalLinkStart() {
+        // Respect the paywall — same gate as the play button
+        guard !isSessionActive, !isTearingDown else { return }
+
+        if !PurchaseManager.shared.canStartSession() {
+            showPaywall()
+            return
+        }
+
+        beginSession()
     }
 
     // ─────────────────────────────────────────────────────────────────────

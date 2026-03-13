@@ -260,6 +260,9 @@ class LiveCameraPreviewView: UIView {
                 
                 // Now move to main thread for UI updates
                 DispatchQueue.main.async {
+                    // Prevent screen from dimming or sleeping while camera is active
+                    UIApplication.shared.isIdleTimerDisabled = true
+
                     let preview = AVCaptureVideoPreviewLayer(session: session)
                     preview.videoGravity = .resizeAspectFill
                     preview.frame = self.bounds
@@ -314,6 +317,9 @@ class LiveCameraPreviewView: UIView {
             session.stopRunning()
             
             DispatchQueue.main.async {
+                // Re-enable idle timer now that the camera is no longer active
+                UIApplication.shared.isIdleTimerDisabled = false
+
                 self?.previewLayer?.removeFromSuperlayer()
                 self?.captureSession = nil
                 self?.previewLayer = nil

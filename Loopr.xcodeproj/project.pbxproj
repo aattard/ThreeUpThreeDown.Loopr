@@ -150,7 +150,7 @@
 				DEVELOPMENT_TEAM = C769VC9239;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopr/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Loopr - Delayed Video Replay";
+				INFOPLIST_KEY_CFBundleDisplayName = Loopr;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Loopr needs camera access to record and replay your swing.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audio is captured with video to preserve timing reference.";
@@ -159,6 +159,7 @@
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -189,7 +190,7 @@
 				DEVELOPMENT_TEAM = C769VC9239;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Loopr/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Loopr - Delayed Video Replay";
+				INFOPLIST_KEY_CFBundleDisplayName = Loopr;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Loopr needs camera access to record and replay your swing.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Audio is captured with video to preserve timing reference.";
@@ -198,6 +199,7 @@
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

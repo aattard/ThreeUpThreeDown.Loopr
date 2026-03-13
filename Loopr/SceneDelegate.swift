@@ -18,16 +18,43 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         
         // Pre-warm camera and create HomeVC in background
         prewarmApp()
+        
+        // Handle Universal Link if app was launched cold via one
+        if let userActivity = connectionOptions.userActivities.first,
+           userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+           let url = userActivity.webpageURL,
+           url.path.hasPrefix("/start") {
+            pendingUniversalLink = true
+        }
     }
     
+    // MARK: - Universal Links
+    
+    /// Flags a /start Universal Link that arrived before HomeVC was ready.
+    /// HomeViewController checks this once it finishes loading and clears it.
+    var pendingUniversalLink: Bool = false
+    
+    func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
+              let url = userActivity.webpageURL,
+              url.path.hasPrefix("/start") else { return }
+        
+        // If HomeVC is already live, fire immediately
+        if let homeVC = homeVC {
+            homeVC.handleUniversalLinkStart()
+        } else {
+            // App is still warming up — flag it for HomeVC to pick up
+            pendingUniversalLink = true
+        }
+    }
+    
+    // MARK: - App Setup
+    
     func showMainApp() {
-        // Transition to main app
         guard let homeVC = homeVC else { return }
         let navController = UINavigationController(rootViewController: homeVC)
         navController.setNavigationBarHidden(true, animated: false)
         window?.rootViewController = navController
-        
-        // Clean up splash reference
         splashVC = nil
     }
     
@@ -35,7 +62,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
 
         if status == .notDetermined {
-            // First launch — request permission
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
                     if granted {
@@ -43,14 +69,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
                         self.setupHomeViewController()
                     } else {
                         print("❌ Camera access denied")
-                        // Still set up HomeVC so splash can transition
-                        // HomeVC will show the alert once it appears
                         self.setupHomeViewController()
                     }
                 }
             }
         } else {
-            // Permission already determined (granted or denied) — set up immediately
             DispatchQueue.main.async {
                 self.setupHomeViewController()
             }
@@ -65,14 +88,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
     
     private func setupHomeViewController() {
-        // Create HomeVC and set callback
         homeVC = HomeViewController()
         homeVC?.onCameraPreviewReady = { [weak self] in
             print("✅ Camera preview ready, dismissing splash")
             self?.splashVC?.cameraIsReady()
         }
-        
-        // Trigger the view to load (which starts camera setup)
         _ = homeVC?.view
     }
     
