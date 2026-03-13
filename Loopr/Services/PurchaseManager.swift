@@ -58,6 +58,13 @@ final class PurchaseManager {
 
     /// Call once from AppDelegate / SceneDelegate at launch.
     func initialize() async {
+        /*
+        // TEMP: Reset trial for screen recording – remove before next build
+        NSUbiquitousKeyValueStore.default.removeObject(forKey: "loopr_trial_start_date")
+        NSUbiquitousKeyValueStore.default.synchronize()
+        UserDefaults.standard.removeObject(forKey: "loopr_trial_start_date")
+        // END: Reset trial for screen recording – remove before next build
+        */
         await loadProduct()
         await refreshAccessState()
         // Listen for purchases made outside the app (e.g. family sharing / gifting)
